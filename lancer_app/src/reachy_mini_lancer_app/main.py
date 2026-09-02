@@ -140,6 +140,9 @@ _DOA_HEAD_SHARE = 0.0        # radians
 # earlier, without touching the mechanical safety that limit provides.
 _BODY_ASSIST_DEADBAND = 0.20   # radians (~11 deg) of head yaw before the body helps
 _BODY_ASSIST_EXIT_RATIO = 0.35  # keep going until well inside the deadband
+# While speaking, the body still follows but waits for a bigger offset: every
+# move is motor noise reaching a microphone that is listening for an interrupt.
+_BODY_ASSIST_SPEAKING_DEADBAND = 0.38   # radians (~22 deg)
 _BODY_ASSIST_GAIN = 0.22       # fraction of the remaining head yaw per step
 _BODY_ASSIST_MAX_STEP = 0.05   # radians per step, so ~19 deg/s at this interval
 _BODY_ASSIST_INTERVAL = 0.15   # seconds between steps; small and often is smooth
@@ -561,8 +564,10 @@ class Lancer:
                        else _YOLO_IDLE_INTERVAL)
             if self.stopping:
                 return
-            if self.speaking:
-                continue
+            # Tracking deliberately continues while Lancer is talking. Freezing
+            # it made the robot go rigid for the whole of every answer, staring
+            # wherever it happened to be pointing when it started -- which is
+            # the opposite of what a person does when they answer you.
             try:
                 jpeg = self.mini.media.get_frame_jpeg()
                 if not jpeg:
@@ -762,11 +767,13 @@ class Lancer:
 
                 if self.stopping:
                     return
-                # Never while talking (the head is a gesture then, not a
-                # tracker) and never on top of a DoA turn still settling.
+                # The body keeps following while Lancer talks, but lazily: every
+                # move is motor noise into a microphone that is listening for
+                # someone interrupting, so while speaking it takes a wider
+                # deadband and only turns when the head is genuinely off.
                 if self.speaking:
-                    assisting = False
-                    continue
+                    enter = max(enter, _BODY_ASSIST_SPEAKING_DEADBAND)
+                    exit_band = enter * _BODY_ASSIST_EXIT_RATIO
                 if time.monotonic() - self._last_turn < _DOA_MIN_INTERVAL:
                     assisting = False
                     continue

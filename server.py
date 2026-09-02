@@ -253,8 +253,12 @@ TRANSCRIPT_ALIASES: list[tuple[str, str]] = [
     # Bot", "Lancer Belt" -- so the wake word never matched and every command
     # was discarded as overheard chatter. "answer" on its own is left alone; it
     # is an ordinary word and only counts when it opens the utterance as a name.
-    (r"\b(mancer|lanser|lancer belt|lance sir|lancers?bot|dancer bot)\b", "Lancer"),
-    (r"^\s*(answer bot|answer bought|lancer belt|answer belt)\b", "Lancer"),
+    (r"\b(mancer|lanser|lance sir|lancer belt)\b", "Lancer"),
+    # Whisper writes the name as one word as often as two: "Answerbot",
+    # "Lancerbot", "Dancerbot". Matching only the spaced form missed every
+    # single-word case, and the wake word is the main way people address it.
+    (r"\b(answer|lancer|mancer|dancer|lanser|cancer)\s?bots?\b", "Lancer"),
+    (r"^\s*(answer bot|answer bought|answer belt|answer,?)\s", "Lancer "),
     (r"\b(a ?c ?m|acm)\b", "ACM"),
     (r"\b(g ?e|gee ?ee) requirements?\b", "GE requirements"),
     (r"\b(engineer|engineering) school\b", "College of Engineering"),
@@ -292,7 +296,22 @@ _COMMAND_RE = _re.compile(
     r"\b(look (at me|over here|here|this way|at this)|over here|"
     r"turn (around|toward|towards|to me|this way)|face me|face this way|"
     r"watch me|pay attention|wake up|come here|"
-    r"(stop|quit) (talking|it)|be quiet|shut up|never ?mind|forget it)\b",
+    # Things people ask a robot to do with its body. "nod at me" is the exact
+    # phrase that was being discarded as not-a-question while the robot sat
+    # there, which is the worst possible thing to ignore.
+    r"nod|shake your head|wave|dance|spin|wiggle|laugh|"
+    r"say (hi|hello)|greet|go to sleep|"
+    r"(stop|quit) (talking|it|moving)|be quiet|shut up|never ?mind|forget it)\b",
+    _re.I,
+)
+
+# Asking for something, wherever it appears in the sentence. Anchoring these to
+# the start meant "Lancer, nod at me and tell me a joke" was not a request,
+# because the request was in the second half.
+_DIRECTIVE_RE = _re.compile(
+    r"\b(tell me|show me|give me|explain|help me|teach me|remind me|"
+    r"i want to know|i need to know|i'?d like to know|can you|could you|"
+    r"what'?s? (up|good))\b",
     _re.I,
 )
 
@@ -343,9 +362,7 @@ def is_addressed(text: str, face_present: bool) -> tuple[bool, str]:
         return True, "question"
 
     # Direct address without a question: "tell me about X", "I want to know Y".
-    directives = ("tell me", "explain", "show me", "i want to know",
-                  "i need to know", "help me", "give me")
-    if any(lowered.startswith(d) for d in directives):
+    if _DIRECTIVE_RE.search(lowered):
         return True, "directive"
 
     return False, "not-a-question"

@@ -65,9 +65,41 @@ def test_lancer_can_be_told_to_stop(said):
 
 # --- Whisper cannot spell Lancer -----------------------------------------
 
+@pytest.mark.parametrize("said", [
+    "Answerbot, nod at me and tell me a joke.",   # real transcript
+    "Call at me and tell me a joke.",             # real transcript, "nod" misheard
+    "nod at me",
+    "wave at me",
+    "do a dance",
+    "say hi",
+])
+def test_asking_for_a_gesture_reaches_lancer(said):
+    """
+    "nod at me" was being discarded as not-a-question.
+
+    Ignoring someone who asks the robot to nod, while the robot sits there
+    doing nothing, is the worst thing in this file to get wrong.
+    """
+    ok, why = addressed(said)
+    assert ok, f"{said!r} was discarded as {why}"
+
+
+def test_a_request_counts_wherever_it_appears():
+    """
+    Anchoring directives to the start of the sentence missed most of them.
+
+    "Lancer, nod at me and tell me a joke" puts the request in the second half,
+    which is where people usually put it.
+    """
+    assert addressed("nod at me and tell me a joke")[0]
+    assert addressed("if you can hear me, tell me a joke")[0]
+
+
 @pytest.mark.parametrize("mangled", [
     "Mancer Belt. Look over here.",
     "Answer Bot. Lue.",
+    "Answerbot, nod at me.",                      # one word, real transcript
+    "Lancerbot what is BASAI",
     "Lancer Belt, what is BASAI?",
     "lanser what time is it",
 ])
