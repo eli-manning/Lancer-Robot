@@ -218,9 +218,13 @@ SOCIAL_REPLIES: list[tuple[str, str]] = [
      "Happy to help. Ask me anything else about CBU."),
     (r"\b(bye|goodbye|see ya|later|good night)\b",
      "See you. I'll be here, obviously."),
-    (r"\b(play music|sing|dance|tell a joke|take a photo|take a picture)\b",
-     "Can't do that one yet. Right now I answer questions about CBU academics "
-     "and turn my head at people. The ACM team is working on the rest."),
+    # Dancing and joking used to be on this "can't do that" list. Both work now
+    # -- dancing through play_emotion, jokes through the creative route -- and a
+    # canned refusal here fires before either of them is ever reached, so the
+    # robot insisted it could not do things it had just been taught to do.
+    (r"\b(play music|sing me|take a photo|take a picture|record a video)\b",
+     "Can't do that one yet. I can talk, look at you, and move around a bit. "
+     "The ACM team is working on the rest."),
     (r"\b(what.s in your database|what do you have|what do you know about)\b",
      "I've got CBU's computing and engineering material: the degree programs and "
      "their four-year course plans, transfer guides, general education and "
@@ -271,6 +275,87 @@ def normalize_transcript(text: str) -> str:
     for pattern, replacement in TRANSCRIPT_ALIASES:
         out = _re.sub(pattern, replacement, out, flags=_re.I)
     return out
+
+
+# Names that appear in the documents, learned from the documents themselves.
+# Rebuilt whenever the lexical index is.
+_proper_nouns: set[str] = set()
+
+# Whisper hears a name it has never seen and writes something close. "Philip Van
+# Haaster" came through as "Philip Van Hoster", and that one syllable took the
+# rerank score from 3.68 to -5.84 -- below the relevance floor, so the right
+# document was retrieved, ranked first, and then discarded as irrelevant. The
+# corpus is full of names nobody outside CBU can spell, so this will keep
+# happening; matching them back is cheaper than raising the floor and letting
+# genuinely irrelevant chunks through.
+# Generous on purpose. This cutoff used to be the only thing standing between a
+# question about Alan Turing and an answer about the engineering faculty, so it
+# had to be tight, and tight meant it missed real manglings. Now that a repair
+# is only kept when it demonstrably turns a failed search into a good one, a
+# wrong guess costs one extra retrieval and is thrown away, so the matcher can
+# afford to try harder.
+_NAME_MATCH_CUTOFF = 0.66
+_MIN_NAME_LENGTH = 5
+
+# Words this must never "repair". The robot's own name is the important one:
+# CBU's mascot is the Lancers, so the corpus is full of the plural, and matching
+# against it rewrote "Lancer, who is..." into "Lancers, who is...". Campus
+# acronyms are here for the same reason -- they are already handled by the alias
+# table above and must survive it.
+_PROTECTED_WORDS = {
+    "lancer", "lancers", "reachy", "cbu", "basai", "msai", "csds", "acm",
+    "california", "baptist", "university", "college", "engineering",
+}
+
+
+def build_proper_nouns() -> int:
+    """Collect capitalised words from the corpus to match transcripts against."""
+    global _proper_nouns
+    found: set[str] = set()
+    for doc in _bm25_docs:
+        for word in _re.findall(r"\b[A-Z][a-zA-Z'’-]{3,}\b", doc):
+            lowered = word.lower()
+            if lowered not in _STOPWORDS:
+                found.add(lowered)
+    _proper_nouns = found
+    logger.info("Learned %d proper nouns from the corpus", len(found))
+    return len(found)
+
+
+def repair_proper_nouns(text: str) -> str:
+    """
+    Rewrite a probable mis-heard name to the nearest one the documents contain.
+
+    Never call this on the transcript itself. Fuzzy matching against a corpus of
+    campus names is far too eager to be trusted blindly: measured against this
+    corpus it rewrites "Turing" and "Costco" into CBU names, which would turn a
+    question about Alan Turing into a question about the engineering faculty.
+
+    It is safe only as a retrieval fallback -- see retrieve_or_repair, which
+    tries it after a search has already failed and keeps the result only if the
+    repair actually turns the miss into a hit.
+    """
+    if not _proper_nouns:
+        return text
+
+    import difflib
+
+    def replace(match: "_re.Match[str]") -> str:
+        word = match.group(0)
+        lowered = word.lower()
+        if len(lowered) < _MIN_NAME_LENGTH or lowered in _proper_nouns:
+            return word
+        if lowered in _STOPWORDS or lowered in _PROTECTED_WORDS:
+            return word
+        close = difflib.get_close_matches(lowered, _proper_nouns, n=1,
+                                          cutoff=_NAME_MATCH_CUTOFF)
+        if not close:
+            return word
+        repaired = close[0].capitalize()
+        logger.info("Repaired probable name %r -> %r", word, repaired)
+        return repaired
+
+    return _re.sub(r"\b[A-Z][a-zA-Z'’-]{3,}\b", replace, text)
 
 
 WAKE_WORDS = ("lancer", "reachy", "richie", "reach he", "hey robot")
@@ -482,6 +567,7 @@ def build_lexical_index() -> int:
     _bm25_metas = got["metadatas"] or []
     _bm25 = BM25Okapi([_tokenize(d) for d in _bm25_docs]) if _bm25_docs else None
     logger.info("Lexical index built over %d chunks", len(_bm25_docs))
+    build_proper_nouns()
     return len(_bm25_docs)
 
 
@@ -679,6 +765,47 @@ def retrieve(query: str) -> tuple[str, list[str], bool, float | None]:
         best_score if best_score is not None else float("nan"), relevant,
     )
     return "\n\n---\n\n".join(docs), sources, relevant, best_score
+
+
+# A repair has to earn its place: turning a miss into a hit is the point, and a
+# marginal improvement is more likely to be the fuzzy matcher finding something
+# vaguely similar than it is to be the right document.
+_REPAIR_MIN_GAIN = 1.0
+
+
+def retrieve_or_repair(query: str) -> tuple[str, list[str], bool, float | None]:
+    """
+    Retrieve, and if that finds nothing, try again with mis-heard names fixed.
+
+    Whisper writes names it has never seen phonetically: "Philip Van Haaster"
+    came through as "Philip Van Hoster", and that single syllable moved the
+    rerank score from 3.68 to -5.84 -- so the right document was retrieved,
+    ranked first, and then thrown away for being below the relevance floor.
+
+    The repair runs only after a failure and is kept only if it clearly works.
+    That ordering is the whole safety argument: a question that already found
+    its answer is never touched, and a question about someone the corpus has
+    never heard of gets a rewritten retry that fails too, leaving the original
+    miss intact rather than inventing a campus answer for Alan Turing.
+    """
+    context, sources, relevant, score = retrieve(query)
+    if relevant:
+        return context, sources, relevant, score
+
+    repaired = repair_proper_nouns(query)
+    if repaired == query:
+        return context, sources, relevant, score
+
+    logger.info("Retrieval missed; retrying with %r", repaired)
+    r_context, r_sources, r_relevant, r_score = retrieve(repaired)
+    improved = (r_relevant and r_score is not None
+                and r_score >= (score or -99.0) + _REPAIR_MIN_GAIN)
+    if improved:
+        logger.info("Name repair rescued the query (%.2f -> %.2f)",
+                    score if score is not None else float("nan"), r_score)
+        return r_context, r_sources, r_relevant, r_score
+
+    return context, sources, relevant, score
 
 
 # "one" and "there" appear in ordinary questions ("year one", "is there a...")
@@ -1406,7 +1533,7 @@ def plan_turn(query: str, history: list[dict], face: bool = False) -> dict:
     if social is not None:
         return {"mode": "social", "answer": social, "sources": [], "context": ""}
 
-    context, sources, relevant, score = retrieve(query)
+    context, sources, relevant, score = retrieve_or_repair(query)
     cfg = rt.load()
     turns = int(cfg["history_turns"])
     remembered = memory.recall_prompt() if cfg.get("memory_enabled", True) else ""
