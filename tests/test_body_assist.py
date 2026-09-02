@@ -155,5 +155,60 @@ def test_body_assist_is_off_by_default_and_refuses_to_share_the_body():
     assert not started["yes"], "loop must refuse to start against automatic yaw"
 
 
+def test_counter_rotation_keeps_the_head_pointing_the_same_way():
+    """
+    Turning the body must not drag the gaze off the person.
+
+    Head pose is in the body's frame, so a body step of +x moves the head +x in
+    the room unless the head is rotated -x to compensate. Without this the head
+    overshoots on every step and the tracker hauls it back, which is what "the
+    head resets when the body moves" looks like from outside.
+    """
+    import numpy as np
+
+    class FakeMini:
+        media = None
+
+    robot = main.Lancer(FakeMini(), {})
+    step = 0.05
+
+    head_yaw_in_body = 0.30
+    pose = np.eye(4)
+    pose[0, 0] = math.cos(head_yaw_in_body)
+    pose[0, 1] = -math.sin(head_yaw_in_body)
+    pose[1, 0] = math.sin(head_yaw_in_body)
+    pose[1, 1] = math.cos(head_yaw_in_body)
+
+    body_before = 0.10
+    heading_before = body_before + head_yaw_in_body
+
+    compensated = robot._rotate_pose_z(pose, -step)
+    new_head_yaw = math.atan2(compensated[1, 0], compensated[0, 0])
+    heading_after = (body_before + step) + new_head_yaw
+
+    assert heading_after == pytest.approx(heading_before, abs=1e-9)
+    # And the head is now less turned relative to the body, which is the point.
+    assert abs(new_head_yaw) < abs(head_yaw_in_body)
+
+
+def test_counter_rotation_leaves_the_pose_a_valid_rigid_transform():
+    import numpy as np
+
+    class FakeMini:
+        media = None
+
+    robot = main.Lancer(FakeMini(), {})
+    pose = np.eye(4)
+    pose[0, 3], pose[1, 3], pose[2, 3] = 0.01, 0.02, 0.15
+
+    out = robot._rotate_pose_z(pose, -0.05)
+    rotation = out[:3, :3]
+
+    assert out.shape == (4, 4)
+    assert np.allclose(rotation @ rotation.T, np.eye(3), atol=1e-9)
+    assert float(np.linalg.det(rotation)) == pytest.approx(1.0)
+    assert out[3, 3] == pytest.approx(1.0)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

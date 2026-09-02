@@ -761,11 +761,26 @@ class Lancer:
                 if abs(target - present) < 0.005:
                     continue
 
-                # The head is deliberately not touched. The daemon's tracker
-                # owns it and is already holding it on the person; as the body
-                # comes round underneath, the head unwinds toward centre on its
-                # own. Commanding both is what made the two fight.
-                self.mini.set_target_body_yaw(target)
+                # Head and body move as one gesture, in a single command.
+                #
+                # Head pose is expressed in the body's frame, so turning the
+                # body alone drags the head round with it: it swings past the
+                # person by exactly the step, and the tracker then pulls it
+                # back. That overshoot-and-recover on every step is what reads
+                # as the head resetting while the body moves.
+                #
+                # Counter-rotating the head by the same angle cancels it. The
+                # head holds its heading in the room while the body turns
+                # underneath, which is what a person does when they turn to
+                # face someone they are already looking at. The tracker still
+                # owns where the head points; this only keeps that direction
+                # steady through the body's move.
+                pose = self._current_head_pose()
+                if pose is not None:
+                    self.mini.set_target(head=self._rotate_pose_z(pose, -step),
+                                         body_yaw=target)
+                else:
+                    self.mini.set_target_body_yaw(target)
                 self._last_body_move = time.monotonic()
                 moves += 1
                 if moves % 8 == 1:
@@ -810,20 +825,39 @@ class Lancer:
                     logger.warning("Body assist error: %s: %s",
                                    type(e).__name__, e)
 
+    @staticmethod
+    def _rotate_pose_z(pose, angle: float):
+        """Rotate a head pose about the body's vertical axis."""
+        cos, sin = math.cos(angle), math.sin(angle)
+        rotation = np.array([
+            [cos, -sin, 0.0, 0.0],
+            [sin, cos, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+        return rotation @ np.asarray(pose, dtype=float)
+
+    def _current_head_pose(self):
+        """The head's 4x4 pose in the body frame, or None if unreadable."""
+        try:
+            matrix = np.asarray(self.mini.get_current_head_pose(), dtype=float)
+        except Exception:
+            return None
+        return matrix if matrix.shape == (4, 4) else None
+
     def _head_yaw(self) -> float | None:
-        """Current head yaw in radians, from its pose matrix."""
-        try:
-            pose = self.mini.get_current_head_pose()
-        except Exception:
+        """
+        How far the head is turned, in radians, relative to the body.
+
+        Relative is the important word: this is what the body-assist loop
+        drives to zero, and if it were measured in the room's frame instead
+        the loop would be chasing a number its own corrections never change.
+        The runaway guard exists to catch exactly that.
+        """
+        matrix = self._current_head_pose()
+        if matrix is None:
             return None
-        try:
-            matrix = np.asarray(pose, dtype=float)
-            if matrix.shape != (4, 4):
-                return None
-            # Standard yaw extraction from the rotation block.
-            return float(math.atan2(matrix[1, 0], matrix[0, 0]))
-        except Exception:
-            return None
+        return float(math.atan2(matrix[1, 0], matrix[0, 0]))
 
     def doa_loop(self, stop_event: threading.Event) -> None:
         """
