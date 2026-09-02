@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lancer on ZeroClaw</title>
+<style>
+  :root{ --bg:#000; --ink:#fff; --dim:#9aa0a6; --line:#242424; --panel:#0d0d0d;
+         --accent:#e8913a; --ok:#3fb950; --bad:#f85149; --warn:#d29922; }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:16px/1.62 ui-sans-serif,-apple-system,"SF Pro Text",system-ui,sans-serif;
+       padding:32px 20px 96px}
+  main{max-width:860px;margin:0 auto}
+  h1{font-size:27px;margin:0 0 6px;letter-spacing:-.01em}
+  h2{font-size:19px;margin:44px 0 12px;padding-top:18px;border-top:1px solid var(--line)}
+  h3{font-size:15px;margin:26px 0 8px;color:var(--accent);letter-spacing:.02em}
+  p,li{color:#e6e6e6}
+  .sub{color:var(--dim);margin:0 0 8px}
+  code{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+       background:#141414;border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+  pre{background:var(--panel);border:1px solid var(--line);border-radius:8px;
+      padding:13px 15px;overflow-x:auto}
+  pre code{background:none;border:0;padding:0;font-size:12.5px;line-height:1.55}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:14.5px;display:block;overflow-x:auto}
+  th,td{text-align:left;padding:8px 11px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--dim);font-weight:600;font-size:12.5px;text-transform:uppercase;letter-spacing:.06em}
+  .box{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:15px 17px;margin:16px 0}
+  .box.warn{border-color:#4a3a12}
+  .box.bad{border-color:#4a1f1c}
+  .box h4{margin:0 0 7px;font-size:14px;letter-spacing:.02em}
+  .box.warn h4{color:var(--warn)} .box.bad h4{color:var(--bad)}
+  .tag{display:inline-block;font-size:11px;letter-spacing:.05em;text-transform:uppercase;
+       border:1px solid var(--line);border-radius:999px;padding:2px 9px;color:var(--dim);margin-left:7px}
+  .ok{color:var(--ok)} .bad{color:var(--bad)} .warn{color:var(--warn)} .dim{color:var(--dim)}
+  ul,ol{padding-left:21px} li{margin:5px 0}
+  .lede{font-size:17px;color:#dcdcdc;margin:14px 0 0}
+  hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+  .k{color:var(--dim);font-size:13px}
+</style>
+</head>
+<body>
+<main>
+
+<h1>Lancer on ZeroClaw</h1>
+<p class="sub">Porting the CBU campus robot onto the WISS gateway architecture, running on an M3 Max</p>
+
+<p class="lede">The short version: the architecture is a good fit and worth doing, but one macOS constraint reshapes it, and one model choice in the brief is probably wrong. Both are covered below before the build steps.</p>
+
+<h2>Where Lancer is today</h2>
+
+<p>Roughly 2,400 lines across a FastAPI server on the Mac and an installable Reachy Mini app on the robot. It works, and the retrieval quality is measured rather than guessed.</p>
+
+<table>
+<tr><th>Piece</th><th>Lines</th><th>What it does</th></tr>
+<tr><td><code>server.py</code></td><td>1088</td><td>Hybrid retrieval, rerank, grounding verifier, voice endpoint, TTS</td></tr>
+<tr><td><code>lancer_app/main.py</code></td><td>721</td><td>On-robot app: capture, playback, tracking, DoA, barge-in</td></tr>
+<tr><td><code>dashboard.py</code> + HTML</td><td>209</td><td>Config, transcript, retrieval inspector, robot control</td></tr>
+<tr><td><code>lancer_runtime.py</code></td><td>179</td><td>File-backed config and conversation history</td></tr>
+<tr><td><code>tracker.py</code></td><td>115</td><td>YOLO whole-body detection service</td></tr>
+<tr><td><code>eval_retrieval.py</code></td><td>56</td><td>15-case retrieval benchmark: <span class="ok">87% top-1, 100% in-context</span></td></tr>
+</table>
+
+<p>What it lacks, and what ZeroClaw would bring: durable memory across sessions, a real skill/tool system that can call APIs, risk-tiered approval before actions, and reproducible deployment.</p>
+
+<h2>Two things to settle first</h2>
+
+<div class="box bad">
+<h4>1. The model cannot run in Docker on macOS</h4>
+<p>Docker Desktop on Apple Silicon runs a Linux VM with <strong>no Metal passthrough</strong>. A 32B model inside a container would be CPU-only, which is roughly an order of magnitude slower than what you measured natively. For a robot that talks, that is fatal.</p>
+<p class="dim" style="margin-bottom:0">This mirrors WISS exactly, where llama.cpp runs outside the container set and the gateway reaches it over the network. Same shape here: <strong>Ollama stays native on the host</strong>, containers reach it via <code>host.docker.internal</code>. Nothing else changes.</p>
+</div>
+
+<div class="box warn">
+<h4>2. <code>qwen2.5-coder:32b</code> is likely the wrong 32B</h4>
+<p>The coder variants are tuned for code generation. Lancer answers questions about degree requirements and tells jokes to students, and the coder tuning tends to cost conversational quality and instruction-following on that kind of prose.</p>
+<p><strong>Recommendation:</strong> <code>qwen2.5:32b</code> (instruct) rather than the coder build, and benchmark it against the 14B before committing.</p>
+</div>
+
+<h3>Measured latency, and what 32B implies</h3>
+<table>
+<tr><th>Model</th><th>Warm latency</th><th>Throughput</th><th>Resident</th></tr>
+<tr><td><code>qwen2.5:3b</code></td><td>0.53 s</td><td>88 tok/s</td><td>~2 GB</td></tr>
+<tr><td><code>mistral:7b</code></td><td>0.73 s</td><td>65 tok/s</td><td>~4 GB</td></tr>
+<tr><td><code>qwen2.5:14b</code> <span class="tag">current</span></td><td>1.63 s</td><td>32.6 tok/s</td><td>~8 GB</td></tr>
+<tr><td><code>qwen2.5:32b</code> <span class="tag">proposed</span></td><td class="warn">~3–5 s est</td><td>~25 tok/s est</td><td>~18 GB</td></tr>
+</table>
+<p class="k">The 3B fabricated where the 14B correctly declined, so the jump to 14B bought real accuracy. Whether 32B buys enough more to justify roughly doubling the response delay is an open question, and the honest answer is that it needs measuring, not predicting. 64 GB is not the constraint; conversational latency is.</p>
+
+<h2>Target architecture</h2>
+
+<pre><code>macOS host (M3 Max, 64 GB)
+├─ Ollama (native, Metal)          qwen2.5:32b + nomic-embed-text
+│                                  reachable at host.docker.internal:11434
+├─ Docker: lancer-net (fixed subnet)
+│   ├─ zeroclaw            gateway, ws://:8081/ws/chat?agent=lancer
+│   ├─ lancer-db           postgres:16-alpine   memory + sessions
+│   ├─ lancer-chroma       chroma               CBU document RAG
+│   └─ lancer-reflect      reflection worker    proposes skill changes
+├─ lancer-bridge (native)          voice I/O, YOLO tracking, robot control
+└─ Nix flake                       pins all of the above
+
+Reachy Mini  ──wire 14 ms / tailnet 50 ms──▶  lancer-bridge</code></pre>
+
+<h3>Why the bridge stays outside the containers</h3>
+<p>Three things need host access that containers on macOS cannot get cleanly: Metal for YOLO and Kokoro, low-latency audio, and the USB-Ethernet interface to the robot. The bridge keeps those, and hands conversation to ZeroClaw over its WebSocket. It shrinks from 1,088 lines to a few hundred.</p>
+
+<h2>What survives, what changes</h2>
+<table>
+<tr><th>Today</th><th>Under ZeroClaw</th><th>Why</th></tr>
+<tr><td>Hybrid retrieval + rerank</td><td class="ok">Keep, as a skill</td><td>Measured at 87/100; ZeroClaw calls it as a tool</td></tr>
+<tr><td>Grounding verifier</td><td class="ok">Keep</td><td>Caught invented figures and a fabricated university president</td></tr>
+<tr><td>Retrieval eval</td><td class="ok">Keep</td><td>The only reason retrieval decisions are evidence-based</td></tr>
+<tr><td>Kokoro TTS, Whisper STT</td><td class="ok">Keep, host-side</td><td>Need Metal and low latency</td></tr>
+<tr><td>Tracking, DoA, barge-in</td><td class="ok">Keep, host-side</td><td>Hardware-adjacent, unrelated to the agent</td></tr>
+<tr><td>Addressing gate, social replies</td><td class="ok">Keep, host-side</td><td>Must run before anything reaches the model</td></tr>
+<tr><td>Conversation history in JSONL</td><td>→ Postgres</td><td>Durable, queryable, survives restarts</td></tr>
+<tr><td>Config in JSON + dashboard</td><td>→ Nix + <code>config.toml</code></td><td>Reproducible; secrets stay outside git</td></tr>
+<tr><td class="dim">Creative/general routing in code</td><td>→ SOUL.md</td><td>Behaviour becomes editable prose, not branches</td></tr>
+</table>
+
+<h2>What this unlocks</h2>
+<ul>
+<li><strong>Memory that persists.</strong> Postgres-backed recall across sessions, so it remembers a student between visits rather than resetting every six turns.</li>
+<li><strong>Skills that call APIs.</strong> Same shell-skill pattern as WISS: campus events, dining hours, academic calendar, weather, a course catalog lookup. Each is a directory with a script.</li>
+<li><strong>Risk-tiered approval.</strong> <code>locked_down</code> auto-approves reads and gates anything that acts, which matters the moment a robot in a hallway can do more than talk.</li>
+<li><strong>The reflection loop.</strong> The worker mines real transcripts and proposes new skills; a human approves before anything lands. For an ACM chapter this is the most interesting part to demo and to staff.</li>
+<li><strong>Reproducible.</strong> One flake, one command, a second machine matches.</li>
+</ul>
+
+<h2>Build order</h2>
+
+<h3>Phase 0 — de-risk <span class="tag">half a day</span></h3>
+<p>Do not build anything until these three answers are in. Each can invalidate the plan.</p>
+<ol>
+<li><strong>Does ZeroClaw build for arm64?</strong> The source is public and reachable (verified). The WISS image is <code>debian:bookworm-slim</code> on x86. An arm64 build is likely fine but unproven; if it is not, the fallback is running it under emulation, which is slow, or building a thin gateway ourselves.</li>
+<li><strong>Benchmark <code>qwen2.5:32b</code></strong> against the 14B on the existing eval plus a latency run. Decide on numbers.</li>
+<li><strong>Confirm containers reach host Ollama</strong> at <code>host.docker.internal:11434</code> under Docker Desktop.</li>
+</ol>
+
+<h3>Phase 1 — containers up <span class="tag">1 day</span></h3>
+<p>Nix flake with <code>nix-darwin</code>, a compose stack for the four containers on a fixed subnet, <code>config.toml</code> templated with the Ollama endpoint, secrets in an untracked env file. Success: a WebSocket chat with the agent from the terminal.</p>
+
+<h3>Phase 2 — retrieval as a skill <span class="tag">1 day</span></h3>
+<p>Wrap the existing hybrid retrieval as a ZeroClaw skill the agent calls, rather than a step it is forced through. Re-point Chroma into the container. Success: <code>eval_retrieval.py</code> still reports 87/100 through the new path.</p>
+
+<h3>Phase 3 — bridge rewrite <span class="tag">1–2 days</span></h3>
+<p>Strip <code>server.py</code> to voice I/O plus the WebSocket client. Keep the addressing gate, Whisper, Kokoro, YOLO, and robot control. Handle the frame protocol: <code>chunk</code> streams straight to TTS, <code>approval_request</code> gets a spoken confirmation. Success: full voice loop through ZeroClaw.</p>
+
+<h3>Phase 4 — identity and skills <span class="tag">1 day</span></h3>
+<p>Port the persona to <code>SOUL.md</code>, add the first API skills, keep the verifier as a post-check. Success: it answers CBU questions with sources and calls a live API for something the documents cannot answer.</p>
+
+<h3>Phase 5 — reflection <span class="tag">1 day</span></h3>
+<p>Reflection worker plus a review surface in the existing dashboard. Success: a proposed skill from a real transcript, approved by hand.</p>
+
+<h2>Chunked TTS, and a real latency win</h2>
+<p>Still outstanding from the current build, and it matters more under a 32B. Today the whole answer is synthesised before playback starts. Streaming sentence by sentence means the robot starts talking after the first sentence.</p>
+<p>ZeroClaw already streams <code>chunk</code> frames, so the bridge can synthesise each sentence as it arrives. A 32B at ~25 tok/s takes about four seconds for an 80-token answer, but time-to-first-audio drops to well under a second. <strong>That single change likely matters more to how fast Lancer feels than the model choice does.</strong></p>
+
+<h2>Risks, honestly</h2>
+<table>
+<tr><th>Risk</th><th>Severity</th><th>Mitigation</th></tr>
+<tr><td>ZeroClaw does not build on arm64</td><td class="bad">High</td><td>Phase 0 proves it before anything depends on it</td></tr>
+<tr><td>32B too slow to feel conversational</td><td class="warn">Medium</td><td>Chunked TTS first; 14B stays a config flip away</td></tr>
+<tr><td>Rewrite loses hard-won behaviour</td><td class="warn">Medium</td><td>The gate, verifier and eval move across unchanged, not rewritten</td></tr>
+<tr><td>Docker Desktop networking friction</td><td>Low</td><td>Fixed subnet, exactly as WISS pinned <code>10.250.250.0/24</code></td></tr>
+<tr><td>Scope creep away from a working robot</td><td class="warn">Medium</td><td>Current stack keeps running until Phase 3 passes</td></tr>
+</table>
+
+<div class="box">
+<h4>One caution worth stating plainly</h4>
+<p style="margin-bottom:0">Lancer currently works. This port replaces a working system with a better-architected one, and the intermediate states are worse than what you have. The phases are ordered so the existing stack keeps running until the replacement demonstrably passes the same eval, and the 14B remains one config change away throughout.</p>
+</div>
+
+<h2>Unrelated open bug</h2>
+<p>Body and hip movement is weak: the robot prefers to turn its head, and sound-driven turns often miss. Recent fixes helped but did not resolve it. This is in the robot app and independent of the port, so it should be fixed before Phase 3 rather than carried into a rewrite.</p>
+
+<hr>
+<p class="k">Verified on this machine: Docker CLI and Docker.app present (daemon stopped), Nix absent, ZeroClaw source reachable, Metal unavailable to containers, Ollama native with Metal. Latencies measured warm; 32B figures are estimates pending Phase 0.</p>
+
+</main>
+</body>
+</html>

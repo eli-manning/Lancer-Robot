@@ -1,0 +1,16 @@
+{
+  "name": "web_lookup",
+  "description": "Look up a factual topic on Wikipedia and get a short summary back. Use it for general-knowledge questions Lancer is not certain about -- people, places, history, science, technology, definitions. Do NOT use it for anything about California Baptist University; that comes from cbu_documents. If the lookup returns nothing, say you do not know rather than guessing.",
+  "risk": "read",
+  "spoken_wait": "One second, looking that up.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "topic": {
+        "type": "string",
+        "description": "The subject to look up, as a short noun phrase -- 'Alan Turing', 'reinforcement learning', 'Riverside California'. Not a full sentence question."
+      }
+    },
+    "required": ["topic"]
+  }
+}

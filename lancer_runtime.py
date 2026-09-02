@@ -35,6 +35,17 @@ DEFAULTS: dict[str, Any] = {
     "rerank_enabled": True,
     "verify_grounding": True,
     "relevance_min": -6.0,
+    # skills, memory and streaming
+    "skills_enabled": True,
+    "skill_timeout": 12,
+    "memory_enabled": True,
+    "stream_enabled": True,
+    # A sentence cut off by a false barge-in is resumed from the start of that
+    # sentence rather than abandoned. Off means the old behaviour: drop it.
+    "resume_after_false_barge": True,
+    "resume_grace": 6.0,        # seconds a dropped remainder stays resumable
+    "thinking_sound": True,     # audible cue while the server is working
+    "thinking_sound_volume": 0.06,
     # speech
     "tts_voice": "bm_george",
     "tts_speed": 1.0,
@@ -108,6 +119,9 @@ LIMITS: dict[str, tuple[float, float]] = {
     "head_tracking_weight": (0.0, 1.0),
     "aim_smoothing": (0.05, 1.0),
     "aim_deadband_frac": (0.0, 0.3),
+    "skill_timeout": (2, 60),
+    "resume_grace": (0.0, 60.0),
+    "thinking_sound_volume": (0.0, 0.5),   # louder trips the barge-in gate
 }
 
 

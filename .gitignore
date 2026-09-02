@@ -228,3 +228,12 @@ voices/kokoro/
 # Runtime state, not source
 lancer_config.json
 lancer_history.jsonl
+
+# Local memory database (SQLite fallback when Postgres is not running)
+lancer_memory.db
+lancer_memory.db-shm
+lancer_memory.db-wal
+
+# Reflection proposals and the gateway workspace are runtime state
+stack/proposals/
+stack/workspace/

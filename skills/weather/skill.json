@@ -1,0 +1,16 @@
+{
+  "name": "weather",
+  "description": "Live weather for campus (Riverside, California) from Open-Meteo: conditions now plus a three-day forecast. Call it whenever someone asks about the weather, whether to bring a jacket, or whether it will rain -- Lancer cannot know this without calling.",
+  "risk": "read",
+  "spoken_wait": "Let me check.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "when": {
+        "type": "string",
+        "enum": ["now", "today", "tomorrow", "forecast"],
+        "description": "Which slice of the forecast is wanted. Defaults to now."
+      }
+    }
+  }
+}

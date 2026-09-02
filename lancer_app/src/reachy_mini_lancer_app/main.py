@@ -17,6 +17,7 @@ the RAG server (see server.py), reached over the wired link.
 """
 
 import io
+import json
 import logging
 import math
 import os
@@ -28,6 +29,11 @@ import numpy as np
 import requests
 from reachy_mini import ReachyMini, ReachyMiniApp
 from reachy_mini.utils import create_head_pose
+
+try:
+    from . import sounds
+except ImportError:          # running this file directly rather than as a package
+    import sounds
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +145,14 @@ class Lancer:
         self.vision_mode = "yunet"
         self.request_aim_reset = False
         self._auto_yaw_resume_at = 0.0
+        # Measured once per turn from the AEC residual, then reused for every
+        # sentence in that turn.
+        self._barge_threshold = 0.0
+        self.cues = sounds.Cues(
+            mini,
+            volume=float(self.opt("thinking_sound_volume", 0.06)),
+            enabled=bool(self.opt("thinking_sound", True)),
+        )
 
     @property
     def barge_rms(self) -> float:
@@ -210,12 +224,19 @@ class Lancer:
 
     # -- audio ---------------------------------------------------------------
 
-    def listen(self, stop_event: threading.Event) -> np.ndarray | None:
+    def listen(self, stop_event: threading.Event,
+               max_wait: float | None = None) -> np.ndarray | None:
         """
         Capture one utterance from the mic array.
 
         Returns float32 samples at SAMPLE_RATE, or None if the app was asked to
         stop or nothing worth sending was captured.
+
+        max_wait bounds how long to wait for speech to *start*. Without it this
+        blocks forever, which is right in the idle loop and wrong after a
+        barge-in: if the thing that interrupted Lancer was a door rather than a
+        person, no speech is coming, and waiting for it means never finishing
+        the sentence that was cut off.
         """
         collected: list[np.ndarray] = []
         voiced_samples = 0
@@ -245,6 +266,9 @@ class Lancer:
 
             if speaking and time.monotonic() - began > _MAX_UTTERANCE:
                 break
+            if (not speaking and max_wait is not None
+                    and time.monotonic() - began > max_wait):
+                return None
 
         if not collected:
             return None
@@ -256,13 +280,24 @@ class Lancer:
             return None
         return audio
 
-    def play(self, audio: np.ndarray, stop_event: threading.Event) -> bool:
+    def play(self, audio: np.ndarray, stop_event: threading.Event,
+             calibrate: bool = True, drain: bool = True) -> bool:
         """
         Play float32 samples, listening for the user talking over the top.
 
         Everything is pushed into the playback queue at once and the mic is
         watched for the expected duration; on a genuine interrupt the queue is
         dropped by restarting the output pipeline so Lancer stops mid-sentence.
+
+        calibrate=False reuses the echo threshold measured earlier in this turn.
+        Sentences are played back to back now, and re-measuring the echo floor
+        on every one of them would spend a grace window per sentence -- during
+        which barge-in is disabled, which is most of a short sentence.
+
+        drain=False keeps the microphone buffer instead of discarding it. After
+        an interrupt that buffer holds the first words of whatever the person
+        said, and throwing it away is how the robot ends up asking them to
+        repeat themselves.
 
         Returns True if playback was interrupted by the user.
         """
@@ -274,10 +309,11 @@ class Lancer:
             self.mini.media.push_audio_sample(stereo)
             started = time.monotonic()
             deadline = started + len(audio) / SAMPLE_RATE + 0.3
-            grace_until = started + float(self.opt("barge_grace", _BARGE_GRACE))
+            grace_until = (started + float(self.opt("barge_grace", _BARGE_GRACE))
+                           if calibrate else started)
             barge_enabled = bool(self.opt("barge_enabled", True))
             echo: list[float] = []
-            threshold = self.barge_rms
+            threshold = self._barge_threshold or self.barge_rms
             peak = 0.0
             loud = 0
             while time.monotonic() < deadline and not stop_event.is_set():
@@ -308,6 +344,8 @@ class Lancer:
                     peak = 0.0
                     logger.debug("Barge-in threshold for this reply: %.4f", threshold)
                     echo = []
+                    # Hold it for the rest of the turn's sentences.
+                    self._barge_threshold = threshold
 
                 if not barge_enabled:
                     continue
@@ -324,8 +362,94 @@ class Lancer:
                         "(threshold %.4f)", peak, threshold)
             return False
         finally:
-            self.drain_microphone()
+            if drain:
+                self.drain_microphone()
             self.speaking = False
+
+    def play_reply(self, frames, stop_event: threading.Event) -> tuple:
+        """
+        Play a streaming reply, sentence by sentence, as it arrives.
+
+        The server sends each sentence with its audio already synthesised, so
+        Lancer starts talking while the model is still writing the rest. What
+        this adds on top is the bookkeeping needed to recover from an
+        interruption: the sentence that was cut off, and every sentence after
+        it, is kept.
+
+        Returns (interrupted, pending, meta):
+          interrupted -- someone talked over the answer
+          pending     -- audio not yet spoken, starting at the interrupted
+                         sentence (from its beginning, so resuming never picks
+                         up mid-word)
+          meta        -- the closing frame, for logging and gestures
+        """
+        self._barge_threshold = 0.0
+        pending: list[np.ndarray] = []
+        interrupted = False
+        meta: dict = {}
+        first = True
+
+        self.cues.start_thinking()
+        try:
+            for frame in frames:
+                kind = frame.get("type")
+
+                if kind == "status":
+                    if frame.get("state") == "skill":
+                        # Going out to a live source. Say so with a chirp
+                        # rather than a silence people read as a hang.
+                        self.cues.stop_thinking()
+                        if frame.get("ok", True):
+                            self.cues.skill()
+                        else:
+                            self.cues.error()
+                        self.cues.start_thinking()
+                    continue
+
+                if kind == "sentence":
+                    audio = frame.get("audio")
+                    if audio is None:
+                        continue
+                    if interrupted:
+                        # Still draining the stream so the connection closes
+                        # cleanly, but nothing more gets spoken.
+                        pending.append(audio)
+                        continue
+                    self.cues.stop_thinking()
+                    was_cut = self.play(audio, stop_event,
+                                        calibrate=first, drain=False)
+                    first = False
+                    if was_cut:
+                        interrupted = True
+                        # The cut sentence goes back on the queue whole.
+                        pending.append(audio)
+                    continue
+
+                if kind in ("done", "error"):
+                    meta = frame
+        finally:
+            self.cues.stop_thinking()
+
+        if not interrupted:
+            # Only now: mid-answer the buffer holds Lancer's own voice, but
+            # after an interrupt it holds the first words of whoever cut in.
+            self.drain_microphone()
+        return interrupted, pending, meta
+
+    def play_pending(self, pending: list, stop_event: threading.Event) -> tuple:
+        """
+        Finish an answer that was cut off, starting at the interrupted sentence.
+
+        Still interruptible: someone who talks over the resumed half meant it
+        the second time at least as much as the first.
+        """
+        for position, audio in enumerate(pending):
+            if stop_event.is_set():
+                break
+            if self.play(audio, stop_event, calibrate=False, drain=False):
+                return True, pending[position:]
+        self.drain_microphone()
+        return False, []
 
     def drain_microphone(self) -> None:
         """
@@ -606,10 +730,130 @@ def ask_server(audio: np.ndarray, face_present: bool = False) -> dict | None:
     return payload
 
 
+def stream_server(audio: np.ndarray, face_present: bool = False):
+    """
+    POST one utterance and return an iterator over the reply's frames.
+
+    Returns None when the server declined the utterance -- 422 for nothing
+    intelligible, 204 for speech that was not addressed to Lancer. Both are
+    normal and both mean "say nothing", which is also exactly the test for
+    whether an interruption was real: if the thing that cut Lancer off comes
+    back 204 or 422, nobody was talking to it.
+    """
+    import base64
+
+    try:
+        response = requests.post(
+            f"{SERVER_URL}/voice/stream",
+            params={"face": str(bool(face_present)).lower()},
+            files={"file": ("utterance.wav", to_wav_bytes(audio), "audio/wav")},
+            stream=True,
+            timeout=REQUEST_TIMEOUT,
+        )
+    except requests.RequestException as e:
+        logger.error("Lancer server unreachable at %s: %s", SERVER_URL, e)
+        return None
+
+    if response.status_code in (204, 422):
+        return None
+    if not response.ok:
+        logger.error("Lancer server error %s: %s",
+                     response.status_code, response.text[:200])
+        return None
+
+    def frames():
+        try:
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                try:
+                    frame = json.loads(line)
+                except json.JSONDecodeError:
+                    logger.warning("Unparseable frame: %r", line[:120])
+                    continue
+                if frame.get("type") == "sentence" and frame.get("audio_b64"):
+                    frame["audio"] = wav_bytes_to_float32(
+                        base64.b64decode(frame["audio_b64"])
+                    )
+                yield frame
+        finally:
+            response.close()
+
+    return frames()
+
+
+# How long to wait, after being talked over, for the interrupter to actually say
+# something. Past this it was a noise, and the answer resumes.
+_RESUME_LISTEN_WAIT = 2.0
+
+
 class LancerApp(ReachyMiniApp):  # type: ignore[misc]
     """Reachy Mini Apps entry point for Lancer."""
 
     dont_start_webserver = True
+
+    def converse(self, lancer: "Lancer", frames, face_present: bool,
+                 stop_event: threading.Event) -> None:
+        """
+        Speak one reply, and handle being talked over.
+
+        Being interrupted is not the same as being asked something new. The
+        board's own echo cancellation is imperfect, so a laugh, a dropped bag or
+        someone greeting a friend across the room all clear the barge-in
+        threshold and stop Lancer mid-sentence. Previously that was the end of
+        the answer: the rest was discarded and the robot went back to idle
+        having said half a thing.
+
+        So after an interrupt, find out whether anyone was actually talking to
+        it. Two tests, both of which already existed:
+
+          - nothing intelligible follows within a couple of seconds, or the
+            utterance fails the capture gates (too short, mostly silence)
+          - the server's addressing gate returns 204 (not aimed at Lancer) or
+            422 (not speech)
+
+        Either means the interruption was not real, and the answer picks up from
+        the beginning of the sentence it was cut off in. Anything else is a real
+        question and gets answered instead.
+        """
+        resume_enabled = bool(lancer.opt("resume_after_false_barge", True))
+
+        while frames is not None:
+            interrupted, pending, meta = lancer.play_reply(frames, stop_event)
+            frames = None
+
+            if meta.get("type") == "error":
+                logger.error("Server reported: %s", meta.get("detail"))
+                return
+            if meta:
+                logger.info("heard=%r answer=%r skills=%s",
+                            meta.get("heard", ""), meta.get("answer", "")[:120],
+                            meta.get("skills") or [])
+            lancer.confused() if meta.get("unknown") else lancer.answering()
+
+            # Each pass here is one interruption: work out whether it was real,
+            # and either resume what was cut off or go answer the new question.
+            while (interrupted and pending and resume_enabled
+                   and not stop_event.is_set()):
+                follow_up = lancer.listen(stop_event, max_wait=_RESUME_LISTEN_WAIT)
+
+                if follow_up is not None:
+                    reply = stream_server(follow_up, lancer.face_recently_seen())
+                    if reply is not None:
+                        # A real question. The unfinished answer is dropped on
+                        # purpose -- nobody wants the end of the previous
+                        # answer after asking something else.
+                        logger.info("Interruption was a real question")
+                        lancer.thinking()
+                        frames = reply
+                        break
+                    reason = "not addressed to Lancer"
+                else:
+                    reason = "a noise, not a person"
+
+                logger.info("Interruption was %s -- resuming %d sentence(s)",
+                            reason, len(pending))
+                interrupted, pending = lancer.play_pending(pending, stop_event)
 
     def run(self, reachy_mini: ReachyMini, stop_event: threading.Event) -> None:
         pick_server()
@@ -675,20 +919,15 @@ class LancerApp(ReachyMiniApp):  # type: ignore[misc]
                 # A face that was visible moments ago still counts: detection
                 # drops out constantly when someone turns their head to speak.
                 face_present = lancer.face_recently_seen()
-                reply = ask_server(audio, face_present)
-                if reply is None:
+                lancer.cues.heard()
+                frames = stream_server(audio, face_present)
+                if frames is None:
                     # Overheard chatter: say nothing, move nothing.
                     continue
                 lancer.thinking()
-                logger.info("heard=%r answer=%r", reply["heard"], reply["answer"])
 
-                # Keep following the user while replying -- only the antennas move.
-                if reply["unknown"]:
-                    lancer.confused()
-                else:
-                    lancer.answering()
                 try:
-                    lancer.play(reply["audio"], stop_event)
+                    self.converse(lancer, frames, face_present, stop_event)
                 finally:
                     lancer.answering()
         finally:

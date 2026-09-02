@@ -1,0 +1,14 @@
+{
+  "name": "current_datetime",
+  "description": "The current date, time and day of the week where Lancer is (Riverside, California). Call this for anything time-relative -- today, tomorrow, what day is it, what time is it, is it still morning, how long until a date. Lancer's own training data has no idea what day it is, so never answer a date question without calling this.",
+  "risk": "read",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "until": {
+        "type": "string",
+        "description": "Optional ISO date (YYYY-MM-DD). When given, also returns how many days away that date is."
+      }
+    }
+  }
+}

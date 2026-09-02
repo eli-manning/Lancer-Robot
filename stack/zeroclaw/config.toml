@@ -1,0 +1,133 @@
+schema_version = 3
+
+# Ollama is native on the host and reloads a model when one is swapped from the
+# dashboard, which takes seconds. The stock retry budget (2 retries, 500ms) gives
+# up long before that finishes and surfaces it to the robot as a hard error.
+[reliability]
+provider_retries = 8
+provider_backoff_ms = 1500
+
+[gateway]
+host = "0.0.0.0"
+port = 8081
+allow_public_bind = true
+require_pairing = false
+
+[memory]
+backend = "postgres.main"
+auto_save = true
+
+[storage.postgres.main]
+db_url = "postgres://lancer:lancer@db:5432/lancer"
+connection_timeout_secs = 15
+
+[skills]
+open_skills_enabled = true
+allow_scripts = true
+# Names and descriptions only in the base prompt; SKILL.md bodies load on
+# demand. With a 14B answering out loud, every token of system prompt is
+# prompt-eval time someone is standing there waiting through.
+prompt_injection_mode = "compact"
+
+[skill_bundles]
+
+[skill_bundles.lancer]
+
+[autonomy]
+level = "supervised"
+workspace_only = false
+# Only passive lookups are pre-approved. Everything Lancer ships with today is
+# a read, so in practice nothing prompts -- but the gate is here before the
+# first skill that moves the robot or writes to a system, not after it.
+auto_approve = [
+    "file_read",
+    "memory_recall",
+    "web_search",
+]
+
+[agents]
+
+[agents.lancer]
+runtime_profile = "conversational"
+risk_profile = "campus"
+model_provider = "llamacpp.default"
+skill_bundles = ["lancer"]
+
+[providers]
+
+[providers.models]
+
+[providers.models.llamacpp]
+
+# Ollama serves an OpenAI-compatible API at /v1, so the llamacpp provider block
+# drives it unchanged -- same wire protocol, different server. host.docker.internal
+# is the host from inside the container; Metal stays on the host side of that line.
+[providers.models.llamacpp.default]
+model = "qwen2.5:14b"
+uri = "http://host.docker.internal:11434/v1"
+wire_api = "chat_completions"
+# Must match what Ollama actually serves. Left unset, ZeroClaw assumes 32,000
+# and silently truncates or overruns rather than telling anyone.
+context_window = 32768
+reasoning_effort = "medium"
+
+# Lancer is a robot in a hallway that anyone can walk up to and talk to, so this
+# is genuinely restricted rather than nominally so -- unlike the WISS profile it
+# is modelled on, where the operator is a trusted engineer at a console.
+[risk_profiles.campus]
+allowed_commands = ["python3", "cat", "ls"]
+block_high_risk_commands = true
+forbidden_paths = ["/etc", "/root", "/var/lib"]
+allowed_roots = ["/home/zeroclaw", "/skills", "/tmp"]
+level = "supervised"
+require_approval_for_medium_risk = true
+sandbox_enabled = true
+workspace_only = false
+
+[risk_profiles.campus.delegation_policy]
+# "forbidden", not "deny" -- ZeroClaw's only valid variants here are
+# `forbidden` and `allow`, and an invalid one does not fail the boot: the whole
+# risk_profiles section is silently reset to defaults for that run, so the
+# profile below reads as if it were in force while none of it is.
+mode = "forbidden"
+
+# Tuned for speech rather than for an agent grinding through a long task. The
+# limits that matter here are the ones that keep a turn short enough to listen
+# to; a 30-minute agentic timeout is meaningless when the person asking has
+# already walked away.
+[runtime_profiles]
+
+[runtime_profiles.conversational]
+agentic = true
+agentic_timeout_secs = 120
+compact_context = true
+keep_tool_context_turns = 4
+max_actions_per_hour = 600
+max_context_tokens = 24000
+max_history_messages = 40
+max_system_prompt_chars = 16000
+max_tool_iterations = 4
+max_tool_result_chars = 8000
+memory_recall_limit = 6
+parallel_tools = true
+prompt_injection_mode = "compact"
+shell_timeout_secs = 20
+strict_tool_parsing = false
+
+[runtime_profiles.conversational.context_compression]
+enabled = true
+identifier_policy = "strict"
+max_passes = 2
+protect_first_n = 2
+protect_last_n = 4
+source_max_chars = 24000
+summary_max_chars = 2000
+threshold_ratio = 0.6
+timeout_secs = 30
+
+[runtime_profiles.conversational.thinking]
+default_level = "low"
+native_thinking = false
+
+[onboard_state]
+quickstart_completed = true

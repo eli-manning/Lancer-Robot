@@ -1,0 +1,129 @@
+# Lancer's container stack.
+#
+# What is deliberately NOT in here: Ollama. Docker Desktop on Apple Silicon runs
+# a Linux VM with no Metal passthrough, so a model inside a container is CPU-only
+# and roughly an order of magnitude slower -- fatal for something that has to
+# answer out loud. Ollama stays native on the host and these containers reach it
+# at host.docker.internal:11434, which is the same shape WISS uses to reach
+# llama.cpp outside its container set. Verified reachable from an arm64
+# container on this machine.
+#
+# The voice bridge is not here either, for the same class of reason: it needs
+# Metal for YOLO and Kokoro, low-latency audio, and the USB-Ethernet link to the
+# robot. It runs natively and talks to the gateway over its WebSocket.
+
+name: lancer
+
+services:
+  zeroclaw:
+    # Built from stack/zeroclaw/Dockerfile -- vanilla upstream, no WISS patches
+    # and no mssql-tools, which is what makes an arm64 build possible at all.
+    image: lancer-zeroclaw:arm64
+    container_name: lancer-zeroclaw
+    build:
+      context: ./zeroclaw
+      dockerfile: Dockerfile
+      platforms:
+        - linux/arm64
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    extra_hosts:
+      # Explicit rather than implied: the gateway is useless if it cannot
+      # resolve this, and the failure mode is a timeout rather than an error.
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./zeroclaw/config.toml:/home/zeroclaw/.zeroclaw/config.toml:ro
+      # The skill directories are the ones the RAG server already runs. Same
+      # files, two callers -- a skill fixed for one is fixed for both.
+      - ../skills:/home/zeroclaw/.zeroclaw/skills:ro
+      - ./workspace:/home/zeroclaw/workspace
+    networks:
+      lancer-net:
+        ipv4_address: 10.251.251.10
+
+  db:
+    image: postgres:16-alpine
+    container_name: lancer-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lancer
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lancer}
+      POSTGRES_DB: lancer
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    ports:
+      # Published so the native bridge and dashboard can use the same memory the
+      # gateway does, rather than keeping a second copy in SQLite.
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lancer -d lancer"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      lancer-net:
+        ipv4_address: 10.251.251.11
+
+  chroma:
+    image: chromadb/chroma:latest
+    container_name: lancer-chroma
+    restart: unless-stopped
+    # Deliberately not started by default. A native `chroma run` already serves
+    # port 8001 against ../chroma_data on this machine, and Chroma's store is
+    # SQLite-backed -- two servers writing one directory is how an index that
+    # took a rebuild to get to 87% top-1 becomes a restore from git.
+    #
+    # The cutover is: stop the native process, then
+    #     docker compose --profile cutover up -d chroma
+    # and re-run eval_retrieval.py to confirm the numbers did not move.
+    profiles: ["cutover"]
+    ports:
+      - "8001:8000"
+    volumes:
+      - ../chroma_data:/chroma/chroma
+    networks:
+      lancer-net:
+        ipv4_address: 10.251.251.12
+
+  reflect:
+    build:
+      context: ./reflect
+      dockerfile: Dockerfile
+    container_name: lancer-reflect
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      LANCER_DB_URL: postgres://lancer:${POSTGRES_PASSWORD:-lancer}@db:5432/lancer
+      OLLAMA_URL: http://host.docker.internal:11434
+      REFLECT_MODEL: ${REFLECT_MODEL:-qwen2.5:14b}
+      REFLECT_INTERVAL_SECS: ${REFLECT_INTERVAL_SECS:-1800}
+      REFLECT_MIN_TURNS: ${REFLECT_MIN_TURNS:-15}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Proposals are written here for a human to read; nothing is applied.
+      - ./proposals:/proposals
+      - ../skills:/skills:ro
+    networks:
+      lancer-net:
+        ipv4_address: 10.251.251.13
+
+volumes:
+  db-data:
+
+networks:
+  lancer-net:
+    driver: bridge
+    ipam:
+      config:
+        # Pinned for the same reason WISS pins 10.250.250.0/24: left to itself
+        # Docker picks from 172.17-172.31, which on a machine with other
+        # networks can land on a supernet of a real interface's lease and make
+        # host-gateway traffic unroutable from inside the containers.
+        - subnet: 10.251.251.0/24

@@ -16,11 +16,13 @@ Two modes depending on ROBOT_ENABLED:
 """
 
 import asyncio
+import json
 import logging
 import random as _random
 import re
 import re as _re
 import threading
+import time
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,7 +30,9 @@ from pydantic import BaseModel
 import chromadb
 import ollama
 
+import lancer_memory as memory
 import lancer_runtime as rt
+import lancer_skills as skills
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -552,6 +556,20 @@ def retrieve(query: str) -> tuple[str, list[str], bool, float | None]:
 _FOLLOWUP_HINTS = ("it", "they", "them", "those", "that one", "this one")
 _MAX_FOLLOWUP_WORDS = 8
 
+# "It" does not always point at the previous turn. In "what day is it?" or "is
+# it raining?" the pronoun is a placeholder with no antecedent, and folding the
+# last question in front of it produces a mash-up that retrieves nothing and
+# gets refused -- which is how "what day is it" came back as "that's outside
+# what they gave me" instead of the date.
+_EXPLETIVE_IT = _re.compile(
+    r"\b(?:what|which|how)\s+(?:day|time|date|month|year|weather|hot|cold|late)\b"
+    r"|\bwhat'?s\s+(?:the\s+)?(?:time|date|day|weather)\b"
+    r"|\b(?:is|was|does)\s+it\s*[?.!]*$"
+    r"|\bis\s+it\s+(?:rain|snow|sunny|cloudy|cold|hot|warm|windy|nice|late|"
+    r"early|possible|true|worth)",
+    _re.I,
+)
+
 
 def contextualize(query: str, history: list[dict]) -> str:
     """
@@ -561,6 +579,8 @@ def contextualize(query: str, history: list[dict]) -> str:
     meaningful next to the previous turn, so fold that context in first.
     """
     if not history:
+        return query
+    if _EXPLETIVE_IT.search(query):
         return query
     lowered = query.lower()
     words = lowered.split()
@@ -1003,6 +1023,94 @@ def sanitize_for_speech(text: str, max_sentences: int | None = None) -> str:
     return " ".join(x.strip() for x in sentences[:max_sentences]).strip()
 
 
+# --- Sentence streaming --------------------------------------------------
+# The whole answer used to be generated, then synthesised, then played, so the
+# robot stood silent for the sum of all three. Splitting on sentences lets
+# synthesis start on sentence one while the model is still writing sentence two,
+# and lets the robot start talking while both are still happening. With a larger
+# model this is worth far more than any decode-speed gain: time-to-first-word
+# stops depending on answer length.
+
+_SENTENCE_SPLIT = _re.compile(r"(?<=[.!?])\s+")
+# Abbreviations that end in a period and are not the end of a sentence. Without
+# this "Dr. Smith" is spoken as two fragments with a pause in the wrong place.
+_ABBREVIATIONS = ("dr.", "mr.", "mrs.", "ms.", "prof.", "st.", "vs.", "e.g.",
+                  "i.e.", "etc.", "approx.", "no.", "jr.", "sr.", "ph.d.")
+MIN_SENTENCE_CHARS = 12     # shorter than this, wait for more before speaking
+
+
+def _ends_sentence(text: str) -> bool:
+    """True when text ends on a real sentence boundary rather than an abbreviation."""
+    stripped = text.rstrip()
+    if not stripped or stripped[-1] not in ".!?":
+        return False
+    tail = stripped.lower().split()[-1] if stripped.split() else ""
+    return tail not in _ABBREVIATIONS
+
+
+def split_sentences(text: str) -> list[str]:
+    """Split prose into speakable sentences, keeping abbreviations intact."""
+    parts = _SENTENCE_SPLIT.split(text.strip())
+    out: list[str] = []
+    for part in parts:
+        if out and not _ends_sentence(out[-1]):
+            out[-1] = f"{out[-1]} {part}"
+        elif part.strip():
+            out.append(part.strip())
+    return out
+
+
+def _clean_for_speech(text: str) -> str:
+    """Strip markdown from one sentence without clamping the sentence count."""
+    text = _re.sub(r"[*_`#]+", "", text)
+    text = _re.sub(r"^\s*\d+[.)]\s*", "", text, flags=_re.M)
+    text = _re.sub(r"^\s*[-+•]\s*", "", text, flags=_re.M)
+    return _re.sub(r"\s+", " ", text).strip()
+
+
+_BOUNDARY = _re.compile(r"[.!?](?=\s|$)")
+
+
+def _first_boundary(buffer: str) -> int | None:
+    """
+    Index just past the first real sentence ending in buffer, or None.
+
+    "Real" rules out an abbreviation's period and anything too short to be worth
+    speaking on its own -- a stray "3." would otherwise be sent to the
+    synthesiser as a sentence and played as a lone syllable.
+    """
+    for match in _BOUNDARY.finditer(buffer):
+        candidate = buffer[:match.end()]
+        if len(candidate.strip()) < MIN_SENTENCE_CHARS:
+            continue
+        if not _ends_sentence(candidate):
+            continue
+        return match.end()
+    return None
+
+
+def stream_sentences(model: str, messages: list[dict], options: dict):
+    """
+    Yield whole sentences as the model writes them.
+
+    Ollama streams tokens; nothing downstream wants tokens. Buffer until a
+    sentence boundary lands, then hand the sentence off -- that is the unit
+    both the grounding check and the speech synthesiser work in.
+    """
+    buffer = ""
+    for chunk in ollama.chat(model=model, messages=messages,
+                             options=options, stream=True):
+        buffer += chunk.get("message", {}).get("content", "")
+        while True:
+            cut = _first_boundary(buffer)
+            if cut is None:
+                break
+            yield buffer[:cut].strip()
+            buffer = buffer[cut:].lstrip()
+    if buffer.strip():
+        yield buffer.strip()
+
+
 # Single robot, single conversation -- module-level history is sufficient.
 _history: list[dict] = []
 
@@ -1066,6 +1174,520 @@ async def voice(file: UploadFile = File(...), face: bool = False):
         audio_b64=base64.b64encode(audio).decode(),
         unknown=unknown,
     )
+
+
+# =============================================================================
+# Streaming voice turn
+#
+# /voice returns one finished answer with one block of audio. /voice/stream
+# returns the same turn as a sequence of NDJSON frames, so the robot can start
+# speaking sentence one while sentence three is still being written:
+#
+#   {"type":"heard",    "text":...}
+#   {"type":"status",   "state":"thinking"|"skill", "skill":..., "say":...}
+#   {"type":"sentence", "index":0, "text":..., "audio_b64":..., "last":false}
+#   {"type":"done",     "answer":..., "sources":[...], "unknown":false}
+#   {"type":"error",    "detail":...}
+#
+# The frame names are the ones ZeroClaw's WebSocket already uses for the same
+# ideas, so the Phase 3 bridge swaps its source of frames without the playback
+# code changing.
+# =============================================================================
+
+# Skills the model may call on each route. The grounded CBU path deliberately
+# gets none: its retrieval is measured at 87% top-1 and a model that can choose
+# whether to look something up is a model that can choose not to.
+SKILLS_BY_MODE = {
+    "general": ["current_datetime", "weather", "web_lookup"],
+    "guarded": ["current_datetime", "weather", "web_lookup"],
+    "creative": ["current_datetime", "weather"],
+    "grounded": [],
+}
+
+# Some questions have exactly one right source and no judgement to exercise.
+# Leaving those to the model's discretion is how "what day is it?" came back as
+# "Wednesday, March 29, 2023" -- confident, well-formed, three years stale, from
+# a model that had a working clock available and chose not to call it.
+#
+# Fetching these before the model is asked anything is both more reliable and
+# faster: it removes the tool-selection round trip entirely for the two skills
+# people ask for most.
+_PREFETCH: list[tuple[object, str, dict]] = [
+    (_re.compile(r"\b(what|which)\s+(day|date|time|month|year)\b"
+                 r"|\bwhat'?s\s+(the\s+)?(day|date|time)\b"
+                 r"|\b(today|tonight|tomorrow|right now)\b"
+                 r"|\btime is it\b|\bhow many days\b", _re.I),
+     "current_datetime", {}),
+    (_re.compile(r"\bweather\b|\btemperature\b|\bforecast\b|\brain(ing|y)?\b"
+                 r"|\bhot\s+(out|outside|today)\b|\bcold\s+(out|outside|today)\b"
+                 r"|\bjacket\b|\bumbrella\b|\bsunny\b", _re.I),
+     "weather", {}),
+]
+
+
+def prefetch_for(query: str) -> list[str]:
+    """Skills whose answer this question definitely needs, whatever the model thinks."""
+    return [name for pattern, name, _ in _PREFETCH if pattern.search(query)]
+
+
+SKILL_HINT = (
+    "You have tools for things you cannot know on your own: the current date "
+    "and time, live campus weather, and Wikipedia lookups. Call them rather "
+    "than guessing -- you have no idea what today's date is without asking. "
+    "Never use a tool for California Baptist University facts."
+)
+
+
+def plan_turn(query: str, history: list[dict], face: bool = False) -> dict:
+    """
+    Decide how to answer, without generating anything yet.
+
+    Same routing the non-streaming path uses, pulled out so both callers make
+    identical decisions -- a divergence here would mean the eval measures a
+    path the robot does not actually take.
+    """
+    query = contextualize(query, history)
+
+    social = social_reply(query)
+    if social is not None:
+        return {"mode": "social", "answer": social, "sources": [], "context": ""}
+
+    context, sources, relevant, score = retrieve(query)
+    cfg = rt.load()
+    turns = int(cfg["history_turns"])
+    remembered = memory.recall_prompt() if cfg.get("memory_enabled", True) else ""
+
+    def system(*blocks: str) -> list[dict]:
+        return [{"role": "system", "content": b} for b in blocks if b]
+
+    if is_creative(query):
+        grounding = (f"Some CBU material that may help:\n\n{context}" if relevant
+                     else "You have no CBU documents for this one -- keep it general.")
+        return {
+            "mode": "creative",
+            "messages": [*system(CREATIVE_PROMPT, grounding, remembered, SKILL_HINT),
+                         *history[-turns:], {"role": "user", "content": query}],
+            "options": {"temperature": max(float(cfg["temperature"]), 0.7)},
+            "context": context if relevant else "",
+            "sources": sources if relevant else [],
+            "verify": "light",
+        }
+
+    if not relevant:
+        if _needs_cbu_facts(query):
+            # Refusing outright here is what made "I'm majoring in AI, what day
+            # is it?" come back as "drawing a blank" -- one CBU-ish word in a
+            # sentence hijacked a question that was not about CBU at all. The
+            # guarded route answers whatever it legitimately can while a
+            # per-sentence gate blocks any CBU specifics it tries to invent,
+            # which is the property the flat refusal was protecting.
+            return {
+                "mode": "guarded",
+                "messages": [*system(GENERAL_PROMPT, GUARDED_PROMPT, remembered,
+                                     SKILL_HINT),
+                             *history[-turns:], {"role": "user", "content": query}],
+                "options": {"temperature": cfg["temperature"]},
+                "context": "", "sources": [], "verify": "guarded",
+            }
+        return {
+            "mode": "general",
+            "messages": [*system(GENERAL_PROMPT, remembered, SKILL_HINT),
+                         *history[-turns:], {"role": "user", "content": query}],
+            "options": {"temperature": cfg["temperature"]},
+            "context": "", "sources": [], "verify": "none",
+        }
+
+    return {
+        "mode": "grounded",
+        "messages": [*system(SYSTEM_PROMPT,
+                             f"Use this CBU info to answer:\n\n{context}",
+                             remembered),
+                     *history[-turns:], {"role": "user", "content": query}],
+        "options": {"temperature": cfg["temperature"]},
+        "context": context, "sources": sources, "verify": "full",
+    }
+
+
+GUARDED_PROMPT = """Your CBU documents have nothing on this one.
+
+If they asked something about California Baptist University, say plainly that \
+you do not have it and suggest their advisor -- do not answer it from memory, \
+and do not guess at a course, a number, a requirement or a person.
+
+If any other part of what they said is something you can answer -- the date, \
+the weather, a general question, or just conversation -- answer that part \
+normally. Someone who mentions their major while asking what day it is has \
+asked you what day it is."""
+
+# A sentence that names the university and also asserts a specific -- a figure,
+# a course code, a title -- is a claim, and on this route nothing supports it.
+# Merely mentioning CBU is fine: "I don't have CBU's calendar" has to be sayable.
+_CBU_MENTION = _re.compile(
+    r"\b(cbu|california baptist|the university|campus|department|program|"
+    r"catalog|registrar)\b", _re.I)
+_CBU_SPECIFIC = _re.compile(
+    r"\b\d[\d,]*\b|\b[A-Z]{2,5}\s?\d{3,4}\b|\b(?:Dr|Prof|President|Dean|Chair)\b")
+
+
+def _asserts_cbu_fact(sentence: str) -> bool:
+    """True when a sentence states a CBU specific nothing in context supports."""
+    return bool(_CBU_MENTION.search(sentence) and _CBU_SPECIFIC.search(sentence))
+
+
+def _sentence_is_grounded(sentence: str, context: str, mode: str) -> bool:
+    """
+    Gate one sentence before it is spoken.
+
+    Verifying per sentence rather than per answer is what makes streaming safe:
+    nothing reaches the speaker until its own specifics have been checked
+    against the source text, so the guarantee is the same one the batch path
+    gives, just applied earlier. It is also stricter in practice -- a bad
+    sentence is caught at sentence three instead of after the whole answer.
+    """
+    if mode == "none":
+        return True
+    if mode == "guarded":
+        # No context exists on this route, so there is nothing to check against:
+        # the only question is whether it is asserting a CBU fact at all.
+        return not _asserts_cbu_fact(sentence)
+    bad = _unsupported_claims(sentence, context)
+    if mode == "light":
+        # Creative replies may carry ordinary numbers; only invented CBU
+        # specifics (a course code, a title, a named person) are disqualifying.
+        bad = [c for c in bad
+               if _re.search(r"[A-Z]{2,}\s*\d|Dr|Prof|President|Dean|Chair", str(c))]
+    if bad:
+        logger.info("Blocked unsupported sentence %r (claims %s)",
+                    sentence[:60], bad[:3])
+        return False
+    return True
+
+
+CUT_SHORT = ("Actually, I don't want to give you a number I can't back up -- "
+             "check with your advisor on that part.")
+
+
+async def _iter_in_thread(make_generator):
+    """
+    Consume a blocking generator from async code.
+
+    Ollama's streaming client and Kokoro are both synchronous. Running the
+    generator in a worker thread and handing items over a queue keeps the event
+    loop free to write frames out to the robot while the model is still
+    decoding.
+    """
+    queue: asyncio.Queue = asyncio.Queue(maxsize=8)
+    loop = asyncio.get_running_loop()
+    done = object()
+
+    def pump():
+        try:
+            for item in make_generator():
+                asyncio.run_coroutine_threadsafe(queue.put(item), loop).result()
+        except Exception as e:                      # surfaced as an error frame
+            asyncio.run_coroutine_threadsafe(queue.put(e), loop).result()
+        finally:
+            asyncio.run_coroutine_threadsafe(queue.put(done), loop).result()
+
+    threading.Thread(target=pump, daemon=True).start()
+    while True:
+        item = await queue.get()
+        if item is done:
+            return
+        if isinstance(item, Exception):
+            raise item
+        yield item
+
+
+# What was written but not said, kept so "go on" can pick it back up. Held for
+# a few minutes: long enough for someone to ask, short enough that the answer
+# to a question two conversations ago never resurfaces.
+_remainder: dict = {"text": "", "at": 0.0}
+REMAINDER_TTL = 300.0
+
+_CONTINUE_RE = _re.compile(
+    r"^\s*(go on|carry on|continue|keep going|and then|finish|go ahead|"
+    r"what else|tell me more|the rest|you were saying|sorry.{0,12}(go on|continue))",
+    _re.I,
+)
+
+
+def wants_continuation(text: str) -> bool:
+    """True when someone is asking Lancer to pick up where it stopped."""
+    if not _remainder["text"]:
+        return False
+    if time.time() - _remainder["at"] > REMAINDER_TTL:
+        _remainder["text"] = ""
+        return False
+    return bool(_CONTINUE_RE.search(text))
+
+
+async def voice_frames(heard: str, face: bool = False, speak: bool = True):
+    """
+    Produce the frames for one turn.
+
+    speak=False skips synthesis and emits text-only sentence frames, which is
+    what the dashboard and the eval use -- Kokoro is the single most expensive
+    thing in the loop and a text client should not pay for it.
+    """
+    import time as _time
+
+    cfg = rt.load()
+    started = _time.monotonic()
+    yield {"type": "heard", "text": heard}
+
+    if cfg.get("memory_enabled", True):
+        await asyncio.to_thread(memory.learn_from, heard)
+
+    # "Go on" is not a question -- it is a request for the part that got cut
+    # off. Answering it through retrieval produces a non-sequitur.
+    if wants_continuation(heard):
+        logger.info("Continuing a cut-off answer")
+        plan = {"mode": "continuation", "answer": _remainder["text"],
+                "sources": [], "context": ""}
+        _remainder["text"] = ""
+    else:
+        yield {"type": "status", "state": "thinking"}
+        plan = await asyncio.to_thread(plan_turn, heard, _history, face)
+
+    max_sentences = int(cfg["max_sentences"])
+    spoken: list[str] = []
+    index = 0
+
+    async def sentence_frame(text: str, idx: int, last: bool = False) -> dict:
+        frame = {"type": "sentence", "index": idx, "text": text, "last": last}
+        if speak:
+            audio = await asyncio.to_thread(synthesize, text)
+            frame["audio_b64"] = base64.b64encode(audio).decode()
+        return frame
+
+    # Social replies, refusals and continuations are already written.
+    if "answer" in plan:
+        for sentence in split_sentences(plan["answer"])[:max_sentences]:
+            yield await sentence_frame(sentence, index)
+            spoken.append(sentence)
+            index += 1
+        answer = " ".join(spoken)
+        sources = plan.get("sources", [])
+        calls: list[dict] = []
+    else:
+        mode = plan["mode"]
+        model = cfg["llm_model"]
+        messages = plan["messages"]
+        calls = []
+
+        allowed = SKILLS_BY_MODE.get(mode) or []
+        if cfg.get("skills_enabled", True) and allowed:
+            # Certain questions get their source fetched outright, before the
+            # model is consulted about it.
+            required = [n for n in prefetch_for(heard) if n in allowed]
+            for name in required:
+                result = await asyncio.to_thread(skills.run_skill, name, {})
+                calls.append({"skill": name, "arguments": {}, "result": result})
+                messages = [*messages[:-1], {
+                    "role": "system",
+                    "content": (f"Live result from {name} -- this is current and "
+                                f"authoritative, use it and do not contradict "
+                                f"it:\n{json.dumps(result)}"),
+                }, messages[-1]]
+
+            # Only ask the model to choose tools when the deterministic route
+            # did not already cover the question. Skipping it saves a whole
+            # round trip on the most common skill turns.
+            if not required:
+                messages, calls = await asyncio.to_thread(
+                    skills.gather, model, messages, plan["options"],
+                    allowed, False, None,
+                )
+            for call in calls:
+                skill = skills.load_skills().get(call["skill"])
+                yield {"type": "status", "state": "skill", "skill": call["skill"],
+                       "say": getattr(skill, "spoken_wait", None),
+                       "ok": bool(call["result"].get("ok"))}
+
+        verify = plan.get("verify", "none")
+        context = plan.get("context", "")
+        truncated = False
+
+        try:
+            async for raw in _iter_in_thread(
+                lambda: stream_sentences(model, messages, plan["options"])
+            ):
+                sentence = _clean_for_speech(raw)
+                if not sentence:
+                    continue
+                if not _sentence_is_grounded(sentence, context, verify):
+                    # Stop here rather than speak it. Everything already said
+                    # passed the same check, so the answer stays honest; it just
+                    # ends earlier than the model intended.
+                    sentence = (_random.choice(MISS_REPLIES) if verify == "guarded"
+                                else CUT_SHORT)
+                    yield await sentence_frame(sentence, index, last=True)
+                    spoken.append(sentence)
+                    index += 1
+                    truncated = True
+                    break
+                if index >= max_sentences:
+                    # Over the spoken limit. Keep the rest for "go on" instead
+                    # of dropping it on the floor.
+                    _remainder["text"] = (_remainder["text"] + " " + sentence).strip()
+                    _remainder["at"] = _time.time()
+                    truncated = True
+                    continue
+                yield await sentence_frame(sentence, index)
+                spoken.append(sentence)
+                index += 1
+        except Exception as e:
+            logger.error("Generation failed: %s", e)
+            yield {"type": "error", "detail": str(e)}
+            return
+
+        if not spoken:
+            # The model produced nothing usable, or every sentence was blocked.
+            # Silence reads as a crash to whoever is standing there.
+            fallback = _random.choice(MISS_REPLIES)
+            yield await sentence_frame(fallback, 0, last=True)
+            spoken.append(fallback)
+
+        answer = " ".join(spoken)
+        sources = plan.get("sources", [])
+        if truncated and _remainder["text"]:
+            logger.info("Held %d chars of answer for a follow-up",
+                        len(_remainder["text"]))
+
+    unknown = (plan.get("mode") == "miss"
+               or "don't have that specific information" in answer)
+    latency = int((_time.monotonic() - started) * 1000)
+
+    _history.append({"role": "user", "content": heard})
+    _history.append({"role": "assistant", "content": answer})
+    del _history[:-int(cfg["history_turns"])]
+
+    rt.record({"heard": heard, "answer": answer, "sources": sources,
+               "unknown": unknown, "model": cfg["llm_model"],
+               "skills": [c["skill"] for c in calls], "latency_ms": latency})
+    if cfg.get("memory_enabled", True):
+        await asyncio.to_thread(
+            memory.record_turn, heard, answer, sources, calls, unknown,
+            cfg["llm_model"], latency,
+        )
+
+    yield {"type": "done", "answer": answer, "sources": sources,
+           "unknown": unknown, "latency_ms": latency,
+           "skills": [c["skill"] for c in calls],
+           "more_available": bool(_remainder["text"])}
+
+
+@app.post("/voice/stream")
+async def voice_stream(file: UploadFile = File(...), face: bool = False):
+    """
+    Streaming version of /voice: same turn, delivered sentence by sentence.
+
+    Returns NDJSON rather than a single JSON body so the robot can act on each
+    frame as it lands. Errors after the first frame arrive as an error frame --
+    the status line is long gone by then.
+    """
+    from fastapi.responses import StreamingResponse
+
+    with tempfile.TemporaryDirectory() as tmp:
+        wav_path = Path(tmp) / "in.wav"
+        wav_path.write_bytes(await file.read())
+        heard = await asyncio.to_thread(transcribe, str(wav_path))
+
+    if not heard or is_artifact(heard):
+        logger.info("[stream] discarding non-speech transcript: %r", heard)
+        raise HTTPException(status_code=422, detail="No usable speech")
+
+    raw_heard = heard
+    heard = normalize_transcript(heard)
+    if heard != raw_heard:
+        logger.info("[stream] normalized %r -> %r", raw_heard, heard)
+
+    addressed, reason = is_addressed(heard, face)
+    # A follow-up like "go on" is three words with no question mark, which the
+    # addressing gate rejects on its own -- but it is unambiguously aimed at the
+    # robot when the robot was just cut off mid-answer.
+    if not addressed and not wants_continuation(heard):
+        logger.info("[stream] ignoring (%s): %r", reason, heard)
+        raise HTTPException(status_code=204, detail=f"not addressed: {reason}")
+
+    logger.info("[stream] heard: %r (addressed via %s)", heard, reason)
+
+    async def frames():
+        async with _conversation_lock:
+            async for frame in voice_frames(heard, face):
+                yield json.dumps(frame) + "\n"
+
+    return StreamingResponse(frames(), media_type="application/x-ndjson")
+
+
+@app.post("/chat/stream")
+async def chat_stream(req: ChatRequest, speak: bool = False):
+    """
+    The streaming turn, driven by typed text instead of speech.
+
+    Same routing, same skills, same per-sentence grounding gate as the robot
+    takes -- which is the point: it is how the pipeline gets exercised without a
+    microphone, and what the eval and the dashboard talk to.
+    """
+    from fastapi.responses import StreamingResponse
+
+    async def frames():
+        async with _conversation_lock:
+            async for frame in voice_frames(req.query, False, speak):
+                yield json.dumps(frame) + "\n"
+
+    return StreamingResponse(frames(), media_type="application/x-ndjson")
+
+
+@app.post("/voice/resume")
+async def voice_resume():
+    """
+    Re-synthesise whatever was cut off, for the robot to finish speaking.
+
+    The robot keeps its own sentence audio and replays locally after a false
+    barge-in, so this is the slower fallback for when it has already discarded
+    the buffer -- and the endpoint the dashboard uses to hear what got dropped.
+    """
+    text = _remainder["text"]
+    if not text:
+        raise HTTPException(status_code=404, detail="nothing held")
+    if time.time() - _remainder["at"] > REMAINDER_TTL:
+        _remainder["text"] = ""
+        raise HTTPException(status_code=410, detail="held text expired")
+    audio = await asyncio.to_thread(synthesize, text)
+    _remainder["text"] = ""
+    return {"text": text, "audio_b64": base64.b64encode(audio).decode()}
+
+
+@app.get("/skills")
+async def list_skills():
+    """What Lancer can actually do, as opposed to what it knows."""
+    return {"skills": skills.describe()}
+
+
+@app.post("/skills/reload")
+async def reload_skills():
+    """Pick up a skill directory added while the server was running."""
+    skills.load_skills(force=True)
+    return {"skills": [s["name"] for s in skills.describe()]}
+
+
+@app.post("/skills/{name}")
+async def invoke_skill(name: str, arguments: dict | None = None):
+    """Run one skill by hand -- how a new skill gets tested before it ships."""
+    return skills.run_skill(name, arguments or {})
+
+
+@app.get("/memory")
+async def memory_state(subject: str = "student"):
+    return {"stats": memory.stats(), "facts": memory.recall(subject, limit=25),
+            "recent": memory.recent_turns(15)}
+
+
+@app.delete("/memory")
+async def memory_forget(subject: str = "student"):
+    return {"forgotten": memory.forget(subject)}
 
 
 @app.post("/reindex")

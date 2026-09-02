@@ -1,0 +1,16 @@
+{
+  "name": "cbu_documents",
+  "description": "Search California Baptist University's own documents -- degree programs and their year-by-year course plans, general education and non-course requirements, transfer and AP credit policies, department policies like variances, and CSDS/engineering material. This is the ONLY acceptable source for any factual claim about CBU: courses, units, requirements, deadlines, names, policies. Call it before answering any CBU question, and if it comes back with nothing, say you do not have that rather than answering from memory.",
+  "risk": "read",
+  "spoken_wait": "Let me pull that up.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "question": {
+        "type": "string",
+        "description": "The question to look up, phrased as the student asked it. Keep campus terms like BASAI, MSAI, CSDS and course codes intact -- they are what the search matches on."
+      }
+    },
+    "required": ["question"]
+  }
+}
