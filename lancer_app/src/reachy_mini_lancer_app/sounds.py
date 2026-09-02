@@ -100,6 +100,8 @@ class Cues:
         self.mini = mini
         self.volume = float(volume)
         self.enabled = bool(enabled)
+        # Set while the robot is asleep: it should make no sound at all.
+        self.muted = False
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -113,7 +115,7 @@ class Cues:
             logger.debug("Cue playback skipped: %s", e)
 
     def play(self, cue: np.ndarray) -> None:
-        if self.enabled and self.volume > 0:
+        if self.enabled and self.volume > 0 and not self.muted:
             self._push(cue)
 
     def skill(self) -> None:
@@ -127,7 +129,7 @@ class Cues:
 
     def start_thinking(self) -> None:
         """Loop the working cue until stop_thinking()."""
-        if not self.enabled or self.volume <= 0 or self._thread:
+        if not self.enabled or self.volume <= 0 or self._thread or self.muted:
             return
         self._stop.clear()
 

@@ -1303,6 +1303,7 @@ class LancerApp(ReachyMiniApp):  # type: ignore[misc]
             if meta.get("asleep") and not lancer.sleeping:
                 logger.info("Server says we are asleep -- tracking stands down")
             lancer.sleeping = bool(meta.get("asleep", lancer.sleeping))
+            lancer.cues.muted = lancer.sleeping
             lancer.confused() if meta.get("unknown") else lancer.answering()
 
             # Each pass here is one interruption: work out whether it was real,
@@ -1401,7 +1402,12 @@ class LancerApp(ReachyMiniApp):  # type: ignore[misc]
                 # A face that was visible moments ago still counts: detection
                 # drops out constantly when someone turns their head to speak.
                 face_present = lancer.face_recently_seen()
-                lancer.cues.heard()
+                # No acknowledging tick while asleep. The microphone stays
+                # live so it can be woken by name, so without this it
+                # chirped at every conversation in the room while folded
+                # up -- which is exactly the opposite of being asleep.
+                if not lancer.sleeping:
+                    lancer.cues.heard()
                 frames = stream_server(audio, face_present)
                 if frames is None:
                     # Overheard chatter: say nothing, move nothing.
