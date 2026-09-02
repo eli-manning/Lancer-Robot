@@ -32,6 +32,10 @@
   button{font:inherit;font-size:12px;padding:5px 11px;border-radius:6px;cursor:pointer;
          background:#21262d;border:1px solid var(--line);color:var(--ink)}
   button:hover{border-color:var(--dim)}
+  button:disabled{opacity:.35;cursor:not-allowed}
+  button:disabled:hover{border-color:var(--line)}
+  button.pri:disabled{background:#21262d;border-color:var(--line);color:var(--dim)}
+  textarea:focus,input:focus,select:focus{outline:1px solid var(--blue);outline-offset:-1px}
   button.pri{background:var(--accent);border-color:var(--accent);color:#1b1206;font-weight:600}
   button.danger{color:var(--bad)}
   #log{height:44vh;overflow-y:auto;display:flex;flex-direction:column;gap:10px;padding:14px}
@@ -70,6 +74,13 @@
   <h1>Lancer <span>Control</span></h1>
   <div class="pills" id="pills"></div>
 </header>
+
+<div id="offline" style="display:none;background:#3d1416;border-bottom:1px solid var(--bad);
+     color:#ffb4b0;padding:9px 20px;font-size:13px">
+  Control panel unreachable. It is the process you start with
+  <code>lancer</code> in a terminal &mdash; nothing on this page works until it
+  is back. <button onclick="status();loadServices()" style="margin-left:8px">Retry</button>
+</div>
 
 <main>
   <div style="display:flex;flex-direction:column;gap:16px">
@@ -127,7 +138,25 @@
         </span>
       </h2>
       <div class="body">
-        <div class="fld">
+        <div class="grid">
+          <div class="fld wide">
+            <label>Addresses — tried in order, first one that answers wins</label>
+            <input id="rhosts" placeholder="10.5.1.1, 100.116.136.5"
+                   onkeydown="if(event.key==='Enter')saveRobotHosts()">
+          </div>
+          <div class="fld">
+            <label>Daemon port</label>
+            <input id="rport" type="number" min="1" max="65535">
+          </div>
+          <div class="fld" style="justify-content:flex-end">
+            <div style="display:flex;gap:6px">
+              <button class="pri" onclick="saveRobotHosts()">Save</button>
+              <button onclick="probeRobot()">Test all</button>
+            </div>
+          </div>
+        </div>
+        <div id="rprobe" class="note"></div>
+        <div class="fld" style="margin-top:10px">
           <label>Speaker volume — <span id="volv">—</span></label>
           <input type="range" id="vol" min="0" max="100" step="5"
                  onchange="setVolume(this.value)">
@@ -166,7 +195,7 @@
     <section>
       <h2>Configuration
         <span class="sp">
-          <button class="pri" onclick="saveCfg()">Save</button>
+          <button class="pri" id="savebtn" onclick="saveCfg()">Save</button>
           <button onclick="resetCfg()">Defaults</button>
         </span>
       </h2>
@@ -181,57 +210,220 @@
 <div class="toast" id="toast"></div>
 
 <script>
-const F = (u,o)=>fetch(u,o).then(r=>r.json());
-let CFG={}, DEF={}, MODELS=[], VOICES=[], SVC=[];
+// Every call goes through here. A dashboard whose panels are one unhandled
+// rejection away from a blank page is worse than no dashboard: the moment you
+// need it most is when something is already broken.
+let ONLINE = true;
+async function F(u,o){
+  try{
+    const r = await fetch(u,o);
+    setOnline(true);
+    const body = await r.text();
+    if(!body) return {};
+    try{ return JSON.parse(body); }
+    catch(e){ return {__error:`HTTP ${r.status}: ${body.slice(0,200)}`}; }
+  }catch(e){
+    setOnline(false);
+    return {__error:'control panel unreachable'};
+  }
+}
+function setOnline(ok){
+  if(ok === ONLINE) return;
+  ONLINE = ok;
+  document.getElementById('offline').style.display = ok ? 'none' : 'block';
+}
+let CFG={}, DEF={}, LIM={}, MODELS=[], VOICES=[], SVC=[], DIRTY=false;
 
 function toast(m){const t=document.getElementById('toast');t.textContent=m;
   t.classList.add('show');setTimeout(()=>t.classList.remove('show'),1800);}
 
+// Every setting in the file is reachable from this page. Anything not named in
+// a group below lands in "Other" rather than being silently unreachable, which
+// is how doa_yaw_sign and the body-assist gains ended up editable only over ssh.
 const GROUPS = {
-  "Generation":["llm_model","temperature","max_sentences","history_turns","persona"],
-  "Retrieval":["top_k","dense_k","lexical_k","fuse_k","rerank_enabled","relevance_min"],
+  "Generation":["llm_model","temperature","max_sentences","history_turns"],
+  "Retrieval":["top_k","dense_k","lexical_k","fuse_k","rerank_enabled",
+    "verify_grounding","relevance_min"],
+  "Conversation":["conversation_backend","skills_enabled","skill_timeout",
+    "memory_enabled","auto_react","stream_enabled","resume_after_false_barge",
+    "resume_grace","thinking_sound","thinking_sound_volume"],
   "Speech":["tts_voice","tts_speed","whisper_model"],
-  "Robot behaviour":["speech_multiplier","speech_rms_ceiling","barge_enabled",
-    "barge_echo_headroom","barge_grace","doa_enabled","doa_priority","head_tracking_weight"]
+  "Hearing and interruption":["speech_multiplier","speech_rms_ceiling",
+    "barge_enabled","barge_echo_headroom","barge_grace"],
+  "Looking and turning":["yolo_tracking","head_tracking_weight","aim_smoothing",
+    "aim_deadband_frac","doa_enabled","doa_priority","doa_deadband",
+    "doa_yaw_sign","doa_head_share","auto_body_yaw","body_assist",
+    "body_assist_deadband","body_assist_gain","body_assist_max_step",
+    "body_assist_interval"],
+  "Persona":["persona"]
+};
+// Edited in their own panels; showing them twice invites two answers to one
+// question.
+const ELSEWHERE = ["llm_provider","robot_hosts","robot_port"];
+
+const HELP = {
+  temperature:"Higher wanders, lower repeats. 0.15 is right for answers from documents.",
+  max_sentences:"Hard cap on the spoken answer. Anything past it is discarded, not shortened.",
+  history_turns:"Messages kept, not exchanges. 12 is six turns of back-and-forth.",
+  relevance_min:"Rerank score below which Lancer says it does not know. Less negative is stricter.",
+  rerank_enabled:"Cross-encoder pass over the fused candidates. Off is faster and noticeably worse.",
+  verify_grounding:"Check each sentence against the retrieved text before speaking it.",
+  conversation_backend:"native runs the pipeline here. zeroclaw hands off to the gateway.",
+  skill_timeout:"Seconds a skill may run before it is abandoned and the answer goes on without it.",
+  resume_after_false_barge:"Finish a sentence that was cut off by a noise rather than a person.",
+  resume_grace:"Seconds a cut-off sentence stays resumable.",
+  thinking_sound_volume:"Above about 0.1 the microphone hears the cue and treats it as a barge-in.",
+  tts_speed:"1.0 is natural. Kokoro refuses outside 0.5-2.0.",
+  whisper_model:"Bigger hears better and answers slower. small.en is the working default.",
+  speech_multiplier:"How much louder than the room something must be to count as speech.",
+  speech_rms_ceiling:"Ceiling on the noise floor estimate, so a loud room cannot deafen the robot.",
+  barge_echo_headroom:"How far above Lancer's own voice you must speak to interrupt him.",
+  barge_grace:"Seconds after Lancer starts talking before an interruption is accepted.",
+  yolo_tracking:"Face detection on the Mac. Off uses the robot's on-board detector, which is much worse.",
+  head_tracking_weight:"How strongly the head follows a detected face.",
+  aim_smoothing:"Higher is smoother and lags more.",
+  doa_enabled:"Turn toward whoever is speaking, using the microphone array.",
+  doa_priority:"Sound wins over vision when they disagree.",
+  doa_yaw_sign:"Flip to -1 if Lancer turns away from the speaker instead of toward them.",
+  doa_head_share:"Share of a sound-turn given to the head. The daemon overwrites head poses, so 0 is correct.",
+  auto_body_yaw:"The daemon moves the body to keep the head within its limits. Must be off if body assist is on.",
+  body_assist:"Our own body controller. Never enable it at the same time as automatic body yaw -- they fight.",
+  body_assist_gain:"Above about 0.3 the body hunts instead of settling.",
+  persona:"Extra instructions appended to the system prompt. Blank uses the built-in persona."
 };
 
 function field(k,v){
   const id='f_'+k, label=k.replace(/_/g,' ');
+  const limit = LIM[k];
+  const help = [HELP[k]||'', limit?`Range ${limit[0]} to ${limit[1]}.`:'']
+    .filter(Boolean).join(' ');
+  const note = help?`<div class="note">${esc(help)}</div>`:'';
   if(typeof v === 'boolean')
     return `<div class="fld"><label>${label}</label><div class="chk">
-      <input type="checkbox" id="${id}" ${v?'checked':''}></div></div>`;
-  if(k==='llm_model'||k==='tts_voice'||k==='whisper_model'){
-    const opts = k==='llm_model'?MODELS : k==='tts_voice'?VOICES : ['tiny.en','base.en','small.en','medium.en'];
+      <input type="checkbox" id="${id}" ${v?'checked':''} onchange="markDirty()">
+      </div>${note}</div>`;
+  if(k==='llm_model'||k==='tts_voice'||k==='whisper_model'||k==='conversation_backend'){
+    const opts = k==='llm_model'?MODELS : k==='tts_voice'?VOICES
+      : k==='conversation_backend'?['native','zeroclaw']
+      : ['tiny.en','base.en','small.en','medium.en'];
     const list = opts.length?opts:[v];
-    return `<div class="fld"><label>${label}</label><select id="${id}">`+
-      list.map(o=>`<option ${o===v?'selected':''}>${o}</option>`).join('')+`</select></div>`;
+    return `<div class="fld"><label>${label}</label>
+      <select id="${id}" onchange="markDirty()">`+
+      list.map(o=>`<option ${o===v?'selected':''}>${esc(String(o))}</option>`).join('')+
+      `</select>${note}</div>`;
   }
-  const wide = k==='persona' ? ' wide' : '';
-  return `<div class="fld${wide}"><label>${label}</label>
-    <input id="${id}" value="${v===null?'':String(v).replace(/"/g,'&quot;')}"></div>`;
+  if(k==='persona')
+    return `<div class="fld wide"><label>${label}</label>
+      <textarea id="${id}" rows="3" oninput="markDirty()"
+        style="background:#0d1117;border:1px solid var(--line);border-radius:6px;
+               color:var(--ink);padding:6px 9px;font:inherit;resize:vertical"
+        >${esc(v===null?'':String(v))}</textarea>${note}</div>`;
+  const numeric = typeof DEF[k] === 'number';
+  const bounds = limit?` min="${limit[0]}" max="${limit[1]}"`:'';
+  const step = numeric && Number.isInteger(DEF[k]) ? ' step="1"' : ' step="any"';
+  return `<div class="fld"><label>${label}</label>
+    <input id="${id}" ${numeric?`type="number"${bounds}${step}`:''} oninput="markDirty()"
+      value="${v===null?'':String(v).replace(/"/g,'&quot;')}">${note}</div>`;
+}
+
+function markDirty(){
+  DIRTY = true;
+  const b = document.getElementById('savebtn');
+  if(b){ b.textContent = 'Save changes'; b.style.outline = '2px solid var(--accent)'; }
+}
+function markClean(){
+  DIRTY = false;
+  const b = document.getElementById('savebtn');
+  if(b){ b.textContent = 'Save'; b.style.outline = 'none'; }
 }
 
 async function loadCfg(){
+  // Don't overwrite half-typed edits under the user's hands on a background poll.
+  if(DIRTY) return;
   const [c,m,v] = await Promise.all([F('/api/config'),F('/api/models'),F('/api/voices')]);
-  CFG=c.config; DEF=c.defaults; MODELS=m.models||[]; VOICES=v.voices||[];
+  if(!c.config) return;
+  CFG=c.config; DEF=c.defaults||{}; LIM=c.limits||{};
+  MODELS=m.models||[]; VOICES=v.voices||[];
+  const grouped = new Set([].concat(...Object.values(GROUPS), ELSEWHERE));
+  const other = Object.keys(CFG).filter(k=>!grouped.has(k));
+  const sections = Object.entries(GROUPS).concat(other.length?[["Other",other]]:[]);
   document.getElementById('cfg').innerHTML =
-    Object.entries(GROUPS).map(([g,keys])=>
-      `<div class="grp">${g}</div>`+keys.filter(k=>k in CFG).map(k=>field(k,CFG[k])).join('')
+    sections.map(([g,keys])=>
+      `<div class="grp">${g}</div>`+keys.filter(k=>k in CFG)
+        .map(k=>field(k,CFG[k])).join('')
     ).join('');
+  markClean();
+  // The robot panel edits the same config file, so it is filled from here.
+  const hostsEl=document.getElementById('rhosts'), portEl=document.getElementById('rport');
+  if(hostsEl && document.activeElement!==hostsEl) hostsEl.value = CFG.robot_hosts||'';
+  if(portEl && document.activeElement!==portEl) portEl.value = CFG.robot_port||8000;
 }
+
 async function saveCfg(){
   const changes={};
   for(const k of Object.keys(CFG)){
     const el=document.getElementById('f_'+k); if(!el) continue;
     if(el.type==='checkbox') changes[k]=el.checked;
-    else if(typeof DEF[k]==='number') changes[k]=parseFloat(el.value);
+    else if(typeof DEF[k]==='number'){
+      const n=parseFloat(el.value);
+      if(Number.isNaN(n)){ toast(`${k} is not a number — not saved`); return; }
+      changes[k]=n;
+    }
     else changes[k]=el.value;
   }
+  // Body assist and automatic body yaw both drive the body. With both on they
+  // fight and the robot oscillates -- it looked like a hardware fault the first
+  // time. Cheaper to refuse here than to diagnose it on the floor again.
+  if(changes.body_assist === true && changes.auto_body_yaw === true){
+    toast('Not saved: body assist and automatic body yaw both drive the body. Turn one off.');
+    return;
+  }
   const r=await F('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({changes})}); CFG=r.config; toast('Saved'); loadCfg();
+    body:JSON.stringify({changes})});
+  if(r.__error){ toast('Save failed: '+r.__error); return; }
+  CFG=r.config; markClean(); toast('Saved'); loadCfg();
+  // Values outside a limit come back clamped; say so rather than letting the
+  // field quietly disagree with what was typed.
+  const fixed = Object.keys(changes).filter(k=>
+    typeof changes[k]==='number' && CFG[k]!==changes[k]);
+  if(fixed.length) toast('Clamped to range: '+fixed.join(', '));
 }
-async function resetCfg(){const r=await F('/api/config/reset',{method:'POST'});
-  CFG=r.config; toast('Defaults restored'); loadCfg();}
+
+async function resetCfg(){
+  if(!confirm('Restore every setting to its default?')) return;
+  const r=await F('/api/config/reset',{method:'POST'});
+  if(r.config){ CFG=r.config; markClean(); toast('Defaults restored'); loadCfg(); }
+}
+
+// --- Robot connection -----------------------------------------------------
+async function saveRobotHosts(){
+  const changes = {
+    robot_hosts: document.getElementById('rhosts').value,
+    robot_port: parseInt(document.getElementById('rport').value,10) || 8000,
+  };
+  const r = await F('/api/config',{method:'POST',
+    headers:{'Content-Type':'application/json'}, body:JSON.stringify({changes})});
+  if(r.__error){ toast('Save failed: '+r.__error); return; }
+  CFG = r.config; toast('Robot addresses saved'); probeRobot();
+}
+
+async function probeRobot(){
+  const out = document.getElementById('rprobe');
+  out.innerHTML = 'testing each address…';
+  const r = await F('/api/robot/probe');
+  if(r.__error){ out.textContent = r.__error; return; }
+  const rows = (r.candidates||[]).map(c=>
+    `<div>${c.reachable?'✅':'❌'} <b>${esc(c.host)}</b>
+      <span class="note">${c.reachable
+        ? `${c.ms}ms · daemon ${esc(c.version||'?')} · ${esc(String(c.state||''))}`
+        : esc(c.error||'no answer')}</span></div>`).join('')
+    || '<div>no addresses configured</div>';
+  const mine = (r.local_addresses||[]).map(a=>`${a}:${r.server_port}`).join(', ');
+  out.innerHTML = rows + (mine?`<div class="note" style="margin-top:6px">
+    This Mac is reachable at ${esc(mine)} — that is what the robot app dials for
+    the RAG server.</div>`:'');
+  status();
+}
 
 function esc(s){return (s||'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));}
 
@@ -241,6 +433,8 @@ function esc(s){return (s||'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'
 // your Anthropic key into the DOM is one screenshot away from leaking it.
 async function loadProviders(){
   const d = await F('/api/providers');
+  if(!d.providers){ document.getElementById('provs').innerHTML =
+    `<div class="note">${esc(d.__error||'unavailable')}</div>`; return; }
   document.getElementById('provs').innerHTML = d.providers.map(p=>{
     const on = p.provider === d.current;
     const models = p.models.map(m=>
@@ -335,8 +529,11 @@ function traceCard(t){
 async function loadTraces(){
   const d = await F('/api/traces?limit=8');
   const el = document.getElementById('traces');
-  el.innerHTML = d.traces.length ? d.traces.map(traceCard).join('')
-    : '<div class="note">No turns recorded yet.</div>';
+  const list = d.traces || [];
+  el.innerHTML = list.length ? list.map(traceCard).join('')
+    : `<div class="note">${d.offline
+        ? 'RAG server is stopped — start it in Services to record turns.'
+        : 'No turns recorded yet.'}</div>`;
 }
 
 setInterval(()=>{ if(document.getElementById('autotrace')?.checked) loadTraces(); }, 4000);
@@ -368,9 +565,12 @@ function svcRow(s){
 
 async function loadServices(){
   const d = await F('/api/services');
-  document.getElementById('svcs').innerHTML = d.services.map(svcRow).join('');
+  const list = d.services || [];
+  document.getElementById('svcs').innerHTML = list.length
+    ? list.map(svcRow).join('')
+    : `<div class="note">${esc(d.__error||'no services reported')}</div>`;
   if(SVC_LOG) svcLog(SVC_LOG, true);
-  return d.services;
+  return list;
 }
 
 async function svc(name, action){
@@ -398,7 +598,7 @@ async function svcLog(name, quiet){
 }
 
 async function refreshLog(){
-  const {history}=await F('/api/history?limit=100');
+  const history=(await F('/api/history?limit=100')).history||[];
   const box=document.getElementById('log');
   box.innerHTML = history.length? history.map(h=>{
     const src=(h.sources||[]).map(s=>s.split('/').pop()).slice(0,2).join(', ');
@@ -423,8 +623,11 @@ async function inspect(){
   const out=document.getElementById('rout'); out.innerHTML='<div class="src">Retrieving…</div>';
   const r=await F('/api/retrieve',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({query:q})});
+  if(!r.results){ out.innerHTML = `<div class="note">${esc(r.offline
+      ? 'RAG server is stopped — start it in Services.' : (r.__error||'failed'))}</div>`;
+    return; }
   out.innerHTML = `<div class="note">relevant: <b>${r.relevant}</b> · best rerank score:
-    <b>${r.best_score===null?'n/a':r.best_score.toFixed(2)}</b></div>` +
+    <b>${typeof r.best_score==='number'?r.best_score.toFixed(2):'n/a'}</b></div>` +
     r.results.map((x,i)=>`<div class="res"><div class="h">#${i+1}
       <b>${esc(x.source)}</b></div><pre>${esc(x.text)}</pre></div>`).join('');
 }
@@ -445,8 +648,10 @@ async function status(){
     <span class="pill">chunks <b>${st.chunks ?? '—'}</b></span>
     <span class="pill">turns <b>${st.history_entries ?? '—'}</b></span>` +
     SVC.map(s=>`<span class="pill"><span class="dot ${s.ready?'on':''}"></span>${esc(s.label)}</span>`).join('');
-  document.getElementById('rstat').textContent =
-    `${s.host} · ${s.online?('daemon '+(s.version||'')+' · wlan '+(s.wlan_ip||'—')):(s.error||'unreachable')}`;
+  document.getElementById('rstat').textContent = s.__error ? s.__error :
+    `${s.reachable_base||s.host} · ${s.online
+      ? ('daemon '+(s.version||'')+' · wlan '+(s.wlan_ip||'—'))
+      : ((s.error||'unreachable')+' — press Test all to see each address')}`;
   if(s.volume!=null){document.getElementById('vol').value=s.volume;
     document.getElementById('volv').textContent=s.volume;}
 }
