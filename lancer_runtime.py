@@ -63,6 +63,12 @@ DEFAULTS: dict[str, Any] = {
     "tts_voice": "bm_george",
     "tts_speed": 1.0,
     "whisper_model": "small.en",
+    # how to reach the robot
+    # Addresses tried in order, first one that answers wins. The wired USB link
+    # first, Tailscale second; add a wifi address here when neither applies.
+    # LANCER_ROBOT in the environment overrides this for one session.
+    "robot_hosts": "10.5.1.1, 100.116.136.5",
+    "robot_port": 8000,
     # robot behaviour (read by the app at startup)
     "speech_multiplier": 2.0,
     "speech_rms_ceiling": 0.045,
@@ -154,6 +160,7 @@ LIMITS: dict[str, tuple[float, float]] = {
     "aim_smoothing": (0.05, 1.0),
     "aim_deadband_frac": (0.0, 0.3),
     "skill_timeout": (2, 60),
+    "robot_port": (1, 65535),
     "resume_grace": (0.0, 60.0),
     "thinking_sound_volume": (0.0, 0.5),   # louder trips the barge-in gate
     "doa_deadband": (0.05, 1.5),

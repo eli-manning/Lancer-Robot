@@ -15,25 +15,23 @@ expressions without a line of animation code.
 from __future__ import annotations
 
 import os
+import sys
 
 import requests
 
-ROBOT_HOSTS = [h for h in (os.environ.get("LANCER_ROBOT"),
-                           "10.5.1.1", "100.116.136.5") if h]
+# Skills run as subprocesses from anywhere, so the repo root has to be on the
+# path before the shared address list can be imported.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import lancer_net                                      # noqa: E402
+
 EMOTION_LIBRARY = "pollen-robotics/reachy-mini-emotions-library"
 TIMEOUT = 8
 
 
 def robot_base() -> str | None:
     """First daemon that answers. None when the robot is unreachable."""
-    for host in ROBOT_HOSTS:
-        try:
-            if requests.get(f"http://{host}:8000/api/daemon/status",
-                            timeout=3).ok:
-                return f"http://{host}:8000"
-        except requests.RequestException:
-            continue
-    return None
+    return lancer_net.base()
 
 
 def robot_post(path: str, payload: dict | None = None,

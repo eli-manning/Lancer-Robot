@@ -8,7 +8,6 @@ restart -- except the Whisper model, which is reloaded on demand.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
@@ -17,27 +16,20 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
+import lancer_net
 import lancer_runtime as rt
 
 router = APIRouter()
 
-# Same failover as the app: wired link when present, Tailscale otherwise.
-ROBOT_HOSTS = [h for h in (os.environ.get("LANCER_ROBOT"),
-                           "10.5.1.1", "100.116.136.5") if h]
-ROBOT_HOST = ROBOT_HOSTS[0]
-
-
 def robot_api() -> str:
-    """Base URL of the first reachable robot daemon."""
-    global ROBOT_HOST
-    for host in ROBOT_HOSTS:
-        try:
-            if requests.get(f"http://{host}:8000/api/daemon/status", timeout=3).ok:
-                ROBOT_HOST = host
-                return f"http://{host}:8000"
-        except requests.RequestException:
-            continue
-    return f"http://{ROBOT_HOSTS[0]}:8000"
+    """
+    Base URL of the first reachable robot daemon.
+
+    The address list is a setting, not a constant -- see lancer_net, which every
+    caller shares so the dashboard and the movement skills can never disagree
+    about where the robot is.
+    """
+    return lancer_net.base() or lancer_net.url_for(lancer_net.hosts()[0])
 APP_NAME = "reachy_mini_lancer_app"
 DASHBOARD_HTML = Path(__file__).parent / "dashboard.html"
 
@@ -59,7 +51,11 @@ async def dashboard() -> str:
 
 @router.get("/api/config")
 async def get_config() -> dict:
-    return {"config": rt.load(), "defaults": rt.DEFAULTS}
+    # Limits go out with the config so the dashboard can show a setting's range
+    # and refuse a bad value in the field. Without them a number outside the
+    # range was quietly clamped on save, which looks like the save failed.
+    return {"config": rt.load(), "defaults": rt.DEFAULTS,
+            "limits": {k: list(v) for k, v in rt.LIMITS.items()}}
 
 
 @router.post("/api/config")
@@ -253,9 +249,32 @@ async def list_voices() -> dict:
     return {"voices": voices}
 
 
+@router.get("/api/robot/probe")
+async def probe_robot() -> dict:
+    """
+    Try every configured address and report what each one did.
+
+    "The robot is offline" is usually "the robot is on the other address", and
+    without this the only way to tell them apart was a terminal. Shows this
+    machine's own addresses too: the robot app has to dial back to the RAG
+    server, and picking the wrong one of these is a robot that hears you and
+    never answers.
+    """
+    import asyncio
+
+    lancer_net.forget()
+    candidates = await asyncio.to_thread(lancer_net.probe_all)
+    return {"candidates": candidates,
+            "local_addresses": lancer_net.local_addresses(),
+            "server_port": 7870}
+
+
 @router.get("/api/robot/status")
 async def robot_status() -> dict:
-    out: dict[str, Any] = {"host": ROBOT_HOST}
+    base = lancer_net.base()
+    out: dict[str, Any] = {"host": base or lancer_net.hosts()[0],
+                           "hosts": lancer_net.hosts(),
+                           "reachable_base": base}
     try:
         daemon = requests.get(f"{robot_api()}/api/daemon/status", timeout=4).json()
         out["online"] = True
@@ -268,7 +287,11 @@ async def robot_status() -> dict:
         out["control_hz"] = round(stats.get("mean_control_loop_frequency", 0), 1)
     except requests.RequestException as e:
         out["online"] = False
-        out["error"] = str(e)
+        # str(e) here is a nested HTTPConnectionPool/NewConnectionError dump.
+        # It says nothing the host and the failure kind do not, and it fills the
+        # panel with noise at the exact moment you want to read it.
+        out["error"] = (f"no daemon answering at "
+                        f"{', '.join(out['hosts'])} ({type(e).__name__})")
         return out
     try:
         app = requests.get(f"{robot_api()}/api/apps/current-app-status", timeout=4).json()
