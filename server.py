@@ -2130,7 +2130,12 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True,
     trace.update({"answer": answer, "sources": sources, "unknown": unknown,
                   "latency_ms": latency, "model": cfg["llm_model"]})
 
-    yield {"type": "done", "heard": heard, "answer": answer, "sources": sources,
+    # The robot uses this to stop its tracking loops for as long as it is
+    # asleep. Inferring it from motor power does not work: power stays on for
+    # the whole fold-down and is only cut at the end, which is exactly the
+    # window in which the shaking happens.
+    yield {"type": "done", "heard": heard, "asleep": is_asleep(),
+           "answer": answer, "sources": sources,
            "unknown": unknown, "latency_ms": latency,
            "skills": [c["skill"] for c in calls],
            "more_available": bool(_remainder["text"])}

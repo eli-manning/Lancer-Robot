@@ -144,7 +144,9 @@ _BODY_ASSIST_EXIT_RATIO = 0.35  # keep going until well inside the deadband
 # move is motor noise reaching a microphone that is listening for an interrupt.
 _BODY_ASSIST_SPEAKING_DEADBAND = 0.38   # radians (~22 deg)
 _MOTOR_CHECK_INTERVAL = 2.0   # seconds between motor-power checks
-_MOVE_CHECK_INTERVAL = 0.3    # seconds; must react inside a move, not after it
+# Short: the whole point is to notice a move that has just started, before the
+# next tracking command goes out on top of it.
+_MOVE_CHECK_INTERVAL = 0.12   # seconds
 _BODY_ASSIST_GAIN = 0.22       # fraction of the remaining head yaw per step
 _BODY_ASSIST_MAX_STEP = 0.05   # radians per step, so ~19 deg/s at this interval
 _BODY_ASSIST_INTERVAL = 0.15   # seconds between steps; small and often is smooth
@@ -201,6 +203,8 @@ class Lancer:
         # Whether the daemon is playing a scripted move; see move_playing().
         self._move_playing = False
         self._move_checked = 0.0
+        # Set from the server's closing frame: while asleep nothing tracks.
+        self.sleeping = False
         self.cues = sounds.Cues(
             mini,
             volume=float(self.opt("thinking_sound_volume", 0.06)),
@@ -737,7 +741,8 @@ class Lancer:
 
     def hands_off(self) -> bool:
         """True when something else owns the joints and tracking must not move."""
-        return self.stopping or not self.motors_live() or self.move_playing()
+        return (self.stopping or self.sleeping or not self.motors_live()
+                or self.move_playing())
 
     def _present_body_yaw(self) -> float | None:
         """
@@ -1295,6 +1300,9 @@ class LancerApp(ReachyMiniApp):  # type: ignore[misc]
                 logger.info("heard=%r answer=%r skills=%s",
                             meta.get("heard", ""), meta.get("answer", "")[:120],
                             meta.get("skills") or [])
+            if meta.get("asleep") and not lancer.sleeping:
+                logger.info("Server says we are asleep -- tracking stands down")
+            lancer.sleeping = bool(meta.get("asleep", lancer.sleeping))
             lancer.confused() if meta.get("unknown") else lancer.answering()
 
             # Each pass here is one interruption: work out whether it was real,
