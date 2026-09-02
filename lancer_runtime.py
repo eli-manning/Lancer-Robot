@@ -36,6 +36,10 @@ DEFAULTS: dict[str, Any] = {
     "verify_grounding": True,
     "relevance_min": -6.0,
     # skills, memory and streaming
+    # "native" runs the pipeline in server.py. "zeroclaw" hands the
+    # conversation to the gateway over its WebSocket. The rollback from one to
+    # the other is this line.
+    "conversation_backend": "native",
     "skills_enabled": True,
     "skill_timeout": 12,
     "memory_enabled": True,

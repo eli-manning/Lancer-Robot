@@ -1422,6 +1422,28 @@ def wants_continuation(text: str) -> bool:
     return bool(_CONTINUE_RE.search(text))
 
 
+def _sync_gateway_sentences(text: str):
+    """
+    Drive the bridge's async generator from a worker thread.
+
+    _iter_in_thread wants a blocking generator, and websockets is async, so the
+    worker thread runs its own event loop for the length of the turn. One loop
+    per turn is cheap next to the model call it is waiting on.
+    """
+    import lancer_bridge
+
+    loop = asyncio.new_event_loop()
+    try:
+        sentences = lancer_bridge.stream_turn(text)
+        while True:
+            try:
+                yield loop.run_until_complete(sentences.__anext__())
+            except StopAsyncIteration:
+                return
+    finally:
+        loop.close()
+
+
 async def voice_frames(heard: str, face: bool = False, speak: bool = True):
     """
     Produce the frames for one turn.
@@ -1470,6 +1492,40 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True):
         answer = " ".join(spoken)
         sources = plan.get("sources", [])
         calls: list[dict] = []
+    elif cfg.get("conversation_backend") == "zeroclaw":
+        # The gateway does its own retrieval, memory and skills, so none of the
+        # local plan is used -- only the sentence stream and the grounding gate,
+        # which are the two things the robot's playback actually depends on.
+        import lancer_bridge
+
+        calls = []
+        context = plan.get("context", "")
+        verify = plan.get("verify", "none")
+        sources = plan.get("sources", [])
+        try:
+            async for raw in _iter_in_thread(
+                lambda: _sync_gateway_sentences(heard)
+            ):
+                sentence = _clean_for_speech(raw)
+                if not sentence or index >= max_sentences:
+                    continue
+                if not _sentence_is_grounded(sentence, context, verify):
+                    yield await sentence_frame(CUT_SHORT, index, last=True)
+                    spoken.append(CUT_SHORT)
+                    index += 1
+                    break
+                yield await sentence_frame(sentence, index)
+                spoken.append(sentence)
+                index += 1
+        except lancer_bridge.GatewayError as e:
+            logger.error("Gateway turn failed: %s", e)
+            yield {"type": "error", "detail": f"gateway: {e}"}
+            return
+        if not spoken:
+            fallback = _random.choice(MISS_REPLIES)
+            yield await sentence_frame(fallback, 0, last=True)
+            spoken.append(fallback)
+        answer = " ".join(spoken)
     else:
         mode = plan["mode"]
         model = cfg["llm_model"]

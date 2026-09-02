@@ -38,9 +38,11 @@ services:
     volumes:
       - ./zeroclaw/config.toml:/home/zeroclaw/.zeroclaw/config.toml:ro
       # The skill directories are the ones the RAG server already runs. Same
-      # files, two callers -- a skill fixed for one is fixed for both.
-      - ../skills:/home/zeroclaw/.zeroclaw/skills:ro
-      - ./workspace:/home/zeroclaw/workspace
+      # files, two callers -- a skill fixed for one is fixed for both. The path
+      # is where ZeroClaw looks for a shared bundle, matching WISS.
+      - ../skills:/home/zeroclaw/.zeroclaw/shared/skills/skills:ro
+      # SOUL.md and the rest of the agent's identity files.
+      - ./agents/lancer/workspace:/home/zeroclaw/.zeroclaw/agents/lancer/workspace
     networks:
       lancer-net:
         ipv4_address: 10.251.251.10
