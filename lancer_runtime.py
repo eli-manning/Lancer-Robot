@@ -26,7 +26,9 @@ DEFAULTS: dict[str, Any] = {
     "llm_model": "qwen2.5:3b",
     "temperature": 0.3,
     "max_sentences": 3,
-    "history_turns": 6,
+    # Messages, not exchanges. Six was three turns, which is not enough to
+    # follow "what about the other one" across a real conversation.
+    "history_turns": 12,
     # retrieval
     "top_k": 5,
     "dense_k": 20,

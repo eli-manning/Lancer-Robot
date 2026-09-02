@@ -144,6 +144,7 @@ _BODY_ASSIST_EXIT_RATIO = 0.35  # keep going until well inside the deadband
 # move is motor noise reaching a microphone that is listening for an interrupt.
 _BODY_ASSIST_SPEAKING_DEADBAND = 0.38   # radians (~22 deg)
 _MOTOR_CHECK_INTERVAL = 2.0   # seconds between motor-power checks
+_MOVE_CHECK_INTERVAL = 0.3    # seconds; must react inside a move, not after it
 _BODY_ASSIST_GAIN = 0.22       # fraction of the remaining head yaw per step
 _BODY_ASSIST_MAX_STEP = 0.05   # radians per step, so ~19 deg/s at this interval
 _BODY_ASSIST_INTERVAL = 0.15   # seconds between steps; small and often is smooth
@@ -197,6 +198,9 @@ class Lancer:
         # Motor power, polled and cached; see motors_live().
         self._motors_live = True
         self._motor_checked = 0.0
+        # Whether the daemon is playing a scripted move; see move_playing().
+        self._move_playing = False
+        self._move_checked = 0.0
         self.cues = sounds.Cues(
             mini,
             volume=float(self.opt("thinking_sound_volume", 0.06)),
@@ -568,7 +572,7 @@ class Lancer:
                        else _YOLO_IDLE_INTERVAL)
             if self.stopping:
                 return
-            if not self.motors_live():
+            if self.hands_off():
                 continue
             # Tracking deliberately continues while Lancer is talking. Freezing
             # it made the robot go rigid for the whole of every answer, staring
@@ -698,6 +702,43 @@ class Lancer:
         self._motors_live = live
         return live
 
+    def move_playing(self) -> bool:
+        """
+        True while the daemon is playing a scripted move.
+
+        Sleeping, waking, and every recorded emotion are moves the daemon runs
+        on its own timeline. The tracking loops know nothing about them, so they
+        carry on aiming the head into the middle of one -- two writers fighting
+        over the same joints. Going to sleep was the visible case: the robot
+        shook on the way down, because it was being folded up and aimed at a
+        face at the same time.
+
+        Motors are still powered for the whole of a fold-down (they are only cut
+        at the end), so motors_live() does not catch this and cannot: the state
+        that matters here is "someone else is driving", not "is there power".
+
+        Polled with a short cache. It has to react within a move, so it cannot
+        be cached as lazily as motor power, but it is a loopback request.
+        """
+        now = time.monotonic()
+        if now - self._move_checked < _MOVE_CHECK_INTERVAL:
+            return self._move_playing
+        self._move_checked = now
+        try:
+            running = requests.get("http://127.0.0.1:8000/api/move/running",
+                                   timeout=2).json()
+            playing = bool(running)
+        except Exception:
+            playing = False
+        if playing != self._move_playing:
+            logger.info("Daemon move %s", "started" if playing else "finished")
+        self._move_playing = playing
+        return playing
+
+    def hands_off(self) -> bool:
+        """True when something else owns the joints and tracking must not move."""
+        return self.stopping or not self.motors_live() or self.move_playing()
+
     def _present_body_yaw(self) -> float | None:
         """
         Where the body is actually pointing, from the daemon.
@@ -804,7 +845,7 @@ class Lancer:
 
                 if self.stopping:
                     return
-                if not self.motors_live():
+                if self.hands_off():
                     assisting = False
                     continue
                 # The body keeps following while Lancer talks, but lazily: every
@@ -964,7 +1005,7 @@ class Lancer:
             try:
                 if self.stopping:
                     return
-                if not self.motors_live():
+                if self.hands_off():
                     time.sleep(_DOA_INTERVAL)
                     continue
                 # Give the body back to vision once the turn has had time to land.

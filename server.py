@@ -807,6 +807,62 @@ def retrieve(query: str) -> tuple[str, list[str], bool, float | None]:
 _REPAIR_MIN_GAIN = 1.0
 
 
+_MAX_TOPIC_CARRY_WORDS = 12
+
+
+def _previous_question(history: list[dict]) -> str:
+    for message in reversed(history):
+        if message.get("role") == "user":
+            return str(message.get("content") or "")
+    return ""
+
+
+def smart_retrieve(query: str,
+                   history: list[dict]) -> tuple[str, list[str], bool, float | None]:
+    """
+    Retrieve, falling back to the conversation and then to name repair.
+
+    A short follow-up carries almost no search terms of its own. "What about the
+    machine learning one?" retrieves nothing on its own merits, because the
+    subject of the sentence was established two turns ago and is not in it. The
+    original contextualiser only expanded follow-ups containing a pronoun, so
+    anything phrased without one fell straight through to a refusal, and Lancer
+    read as having no memory of what it was just talking about.
+
+    Each fallback is tried in turn and kept only if it clearly beats what came
+    before -- the same rule name repair uses, and for the same reason: a
+    rewritten query that retrieves something mediocre is more likely to be the
+    rewrite finding noise than the person having meant something else.
+    """
+    best = retrieve(query)
+    if best[2]:
+        return best
+
+    attempts: list[str] = []
+    previous = _previous_question(history)
+    if previous and len(query.split()) <= _MAX_TOPIC_CARRY_WORDS:
+        # Carry the topic forward. Short follow-ups are the whole reason.
+        attempts.append(f"{previous.rstrip('?.')} -- {query}")
+
+    repaired = repair_proper_nouns(query)
+    if repaired != query:
+        attempts.append(repaired)
+        if previous:
+            attempts.append(f"{previous.rstrip('?.')} -- {repaired}")
+
+    for attempt in attempts:
+        logger.info("Retrieval missed; retrying with %r", attempt)
+        candidate = retrieve(attempt)
+        if candidate[2] and candidate[3] is not None and \
+                candidate[3] >= (best[3] or -99.0) + _REPAIR_MIN_GAIN:
+            logger.info("Retry rescued the query (%.2f -> %.2f)",
+                        best[3] if best[3] is not None else float("nan"),
+                        candidate[3])
+            return candidate
+
+    return best
+
+
 def retrieve_or_repair(query: str) -> tuple[str, list[str], bool, float | None]:
     """
     Retrieve, and if that finds nothing, try again with mis-heard names fixed.
@@ -1611,7 +1667,7 @@ def plan_turn(query: str, history: list[dict], face: bool = False) -> dict:
     if social is not None:
         return {"mode": "social", "answer": social, "sources": [], "context": ""}
 
-    context, sources, relevant, score = retrieve_or_repair(query)
+    context, sources, relevant, score = smart_retrieve(query, history)
     cfg = rt.load()
     turns = int(cfg["history_turns"])
     remembered = memory.recall_prompt() if cfg.get("memory_enabled", True) else ""
