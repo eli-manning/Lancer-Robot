@@ -156,6 +156,80 @@ async def dashboard_memory(subject: str = "student") -> dict:
             "facts": lancer_memory.recall(subject, limit=25)}
 
 
+# --- Providers and keys --------------------------------------------------
+
+class ApiKeyUpdate(BaseModel):
+    provider: str
+    key: str = ""
+
+
+@router.get("/api/providers")
+async def providers() -> dict:
+    import lancer_llm
+
+    return {"providers": lancer_llm.status(),
+            "current": rt.get("llm_provider"),
+            "model": rt.get("llm_model")}
+
+
+@router.post("/api/providers/key")
+async def set_api_key(update: ApiKeyUpdate) -> dict:
+    """
+    Store or clear a provider's API key.
+
+    The key goes to lancer_secrets.json, which is untracked and mode 600 -- not
+    to lancer_config.json, which is committed and which this same dashboard
+    writes to. Keys are never read back out to the browser; the UI only ever
+    learns whether one is set.
+    """
+    import lancer_llm
+
+    if update.provider not in lancer_llm.PROVIDERS:
+        raise HTTPException(status_code=400,
+                            detail=f"unknown provider {update.provider!r}")
+    lancer_llm.save_key(update.provider, update.key.strip())
+    return {"provider": update.provider,
+            "key_set": bool(lancer_llm.api_key(update.provider))}
+
+
+@router.post("/api/providers/test")
+async def test_provider(update: ApiKeyUpdate) -> dict:
+    """Ask the provider to say one word, so a bad key fails here and not mid-answer."""
+    import lancer_llm
+
+    provider = update.provider
+    model = rt.get("llm_model") if provider == rt.get("llm_provider") else None
+    model = model or lancer_llm.SUGGESTED_MODELS.get(provider, [""])[0]
+    try:
+        reply = lancer_llm.complete(
+            [{"role": "user", "content": "Reply with the single word: ready"}],
+            model=model, provider=provider, options={"temperature": 0},
+        )
+        return {"ok": True, "provider": provider, "model": model,
+                "reply": reply.strip()[:120]}
+    except Exception as e:
+        return {"ok": False, "provider": provider, "model": model,
+                "error": f"{type(e).__name__}: {e}"[:300]}
+
+
+# --- Debug traces --------------------------------------------------------
+
+@router.get("/api/traces")
+async def traces(limit: int = 10) -> dict:
+    """
+    The last few turns, with every decision that produced them.
+
+    This is the view that turns "the answer was wrong" into a specific stage:
+    what was transcribed, whether the addressing gate let it through, which
+    route it took, every retrieval candidate with its score and why it was
+    dropped, which skills ran with what arguments, and the grounding verdict on
+    each sentence.
+    """
+    import server
+
+    return {"traces": list(server._traces)[:limit]}
+
+
 @router.get("/api/models")
 async def list_models() -> dict:
     """Ollama models available for generation (embedding models filtered out)."""

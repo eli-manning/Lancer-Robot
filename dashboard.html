@@ -121,6 +121,33 @@
     </section>
 
     <section>
+      <h2>Model provider
+        <span class="sp"><button onclick="loadProviders()">Refresh</button></span>
+      </h2>
+      <div class="body">
+        <div id="provs"></div>
+        <div class="note">Local keeps every question on this machine and works with
+          the network down. Hosted is faster and smarter, and sends the conversation
+          off the robot. Keys are written to <code>lancer_secrets.json</code>, which is
+          untracked and never read back into this page.</div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Debug
+        <span class="sp">
+          <label class="note" style="margin:0"><input type="checkbox" id="autotrace">
+            auto</label>
+          <button onclick="loadTraces()">Refresh</button>
+        </span>
+      </h2>
+      <div class="body">
+        <div id="traces" class="note">No turns yet. Ask something above, or talk to
+          the robot, then refresh.</div>
+      </div>
+    </section>
+
+    <section>
       <h2>Configuration
         <span class="sp">
           <button class="pri" onclick="saveCfg()">Save</button>
@@ -191,6 +218,112 @@ async function resetCfg(){const r=await F('/api/config/reset',{method:'POST'});
   CFG=r.config; toast('Defaults restored'); loadCfg();}
 
 function esc(s){return (s||'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));}
+
+// --- Model provider -------------------------------------------------------
+// The key field is write-only on purpose: the page can ask whether a key is
+// set, and can replace it, but never reads one back. A dashboard that renders
+// your Anthropic key into the DOM is one screenshot away from leaking it.
+async function loadProviders(){
+  const d = await F('/api/providers');
+  document.getElementById('provs').innerHTML = d.providers.map(p=>{
+    const on = p.provider === d.current;
+    const models = p.models.map(m=>
+      `<option ${m===d.model&&on?'selected':''}>${esc(m)}</option>`).join('');
+    return `<div class="fld" style="border-left:3px solid ${on?'var(--ok,#3fb950)':'transparent'};padding-left:10px">
+      <label>${esc(p.provider)}${on?' — in use':''}
+        ${p.needs_key?(p.key_set?' · key set':' · no key'):' · local'}
+        ${p.supports_tool_calls?'':' · no tool calls'}</label>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+        <select id="m_${p.provider}">${models}</select>
+        ${p.needs_key?`<input type="password" id="k_${p.provider}"
+           placeholder="${p.key_set?'key stored — type to replace':'paste API key'}"
+           style="flex:1;min-width:180px">
+         <button onclick="saveKey('${p.provider}')">Save key</button>`:''}
+        <button onclick="testProvider('${p.provider}')">Test</button>
+        <button class="pri" onclick="useProvider('${p.provider}')"
+          ${on?'disabled':''}>Use this</button>
+      </div>
+      <div class="note" id="t_${p.provider}"></div>
+    </div>`;
+  }).join('');
+}
+
+async function saveKey(provider){
+  const el = document.getElementById('k_'+provider);
+  await F('/api/providers/key',{method:'POST',
+    headers:{'content-type':'application/json'},
+    body:JSON.stringify({provider, key: el.value})});
+  el.value=''; toast(provider+' key saved'); loadProviders();
+}
+
+async function testProvider(provider){
+  const out = document.getElementById('t_'+provider);
+  out.textContent = 'testing…';
+  const r = await F('/api/providers/test',{method:'POST',
+    headers:{'content-type':'application/json'},
+    body:JSON.stringify({provider, key:''})});
+  out.textContent = r.ok ? `ok — ${r.model} said “${r.reply}”` : `failed — ${r.error}`;
+}
+
+async function useProvider(provider){
+  const model = document.getElementById('m_'+provider).value;
+  await F('/api/config',{method:'POST',headers:{'content-type':'application/json'},
+    body:JSON.stringify({changes:{llm_provider:provider, llm_model:model}})});
+  toast('now using '+provider+' / '+model);
+  loadProviders(); loadCfg();
+}
+
+// --- Debug ----------------------------------------------------------------
+// One turn per card, in the order the pipeline actually ran. The retrieval
+// table is the point of the whole thing: it shows every candidate the reranker
+// saw, its score, whether it made it into the prompt, and if not, which filter
+// dropped it.
+function traceCard(t){
+  const stages = (t.stages||[]).map(s=>
+    `<span class="pill">${esc(s.name)} ${s.ms}ms</span>`).join(' ');
+  const skills = (t.skills||[]).map(s=>
+    `<div>· <b>${esc(s.skill)}</b>(${esc(JSON.stringify(s.arguments))})
+      <span class="note">${s.chosen_by}${s.ok?'':' — failed'}</span></div>`).join('')
+    || '<div class="note">none</div>';
+  const cand = ((t.retrieval||{}).reranked||[]).map(c=>
+    `<tr><td>${c.score===null?'—':c.score}</td>
+      <td>${c.selected?'<b>kept</b>':'drop'}</td>
+      <td>${esc(c.source||'?')}</td>
+      <td class="note">${esc(c.dropped_because||'')}</td></tr>`).join('');
+  const sentences = (t.sentences||[]).map(s=>
+    `<div>${s.spoken?'🔊':'🚫'} <span class="note">${esc(s.verdict)}</span>
+      ${esc(s.text)}${(s.claims||[]).length?
+        ` <span class="note">unsupported: ${esc(s.claims.join(', '))}</span>`:''}</div>`
+    ).join('') || '<div class="note">none</div>';
+  return `<div class="fld" style="margin-bottom:14px">
+    <label>${new Date((t.ts||0)*1000).toLocaleTimeString()} ·
+      ${esc(t.route||t.addressed_reason||'—')} ·
+      ${t.latency_ms||0}ms${t.asleep?' · asleep':''}</label>
+    <div><b>heard:</b> ${esc(t.heard||'')}
+      ${t.heard_raw&&t.heard_raw!==t.heard?
+        `<span class="note">(raw: ${esc(t.heard_raw)})</span>`:''}</div>
+    ${t.addressed===false?`<div class="note">ignored — ${esc(t.addressed_reason)}</div>`:''}
+    <div style="margin:6px 0">${stages}</div>
+    <div><b>skills</b></div>${skills}
+    <div style="margin-top:6px"><b>retrieval</b>
+      <span class="note">${(t.retrieval||{}).relevant===false?'nothing relevant':''}
+        best ${(t.retrieval||{}).best_score ?? '—'}
+        (floor ${(t.retrieval||{}).relevance_min ?? '—'})</span></div>
+    ${cand?`<table style="width:100%;font-size:12px"><tr><th>score</th><th></th>
+      <th>chunk</th><th>why dropped</th></tr>${cand}</table>`:''}
+    <div style="margin-top:6px"><b>sentences</b></div>${sentences}
+    <div style="margin-top:6px"><b>answer:</b> ${esc(t.answer||'')}</div>
+  </div>`;
+}
+
+async function loadTraces(){
+  const d = await F('/api/traces?limit=8');
+  const el = document.getElementById('traces');
+  el.innerHTML = d.traces.length ? d.traces.map(traceCard).join('')
+    : '<div class="note">No turns recorded yet.</div>';
+}
+
+setInterval(()=>{ if(document.getElementById('autotrace')?.checked) loadTraces(); }, 4000);
 async function refreshLog(){
   const {history}=await F('/api/history?limit=100');
   const box=document.getElementById('log');
@@ -241,7 +374,7 @@ async function status(){
   if(s.volume!=null){document.getElementById('vol').value=s.volume;
     document.getElementById('volv').textContent=s.volume;}
 }
-loadCfg(); refreshLog(); status();
+loadCfg(); refreshLog(); status(); loadProviders(); loadTraces();
 setInterval(refreshLog,4000); setInterval(status,6000);
 </script>
 </body>
