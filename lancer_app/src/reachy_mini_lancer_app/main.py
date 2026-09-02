@@ -117,6 +117,16 @@ _AIM_DEADBAND_FRAC = 0.022   # of frame width -- below this, do not move
 _AIM_MIN_INTERVAL = 0.18     # seconds between commanded moves
 _AIM_RESET_AFTER = 1.5       # seconds of no detection before the filter resets
 _DOA_MAX_YAW = 2.0           # radians (~115 deg); beyond this the IK refuses
+
+# --- Body assist ---
+# Automatic body yaw only involves the body past 65 degrees of head rotation
+# (inverse_kinematics_safe's max_relative_yaw), which is why Lancer reads as
+# head-only for anyone standing in front of it. These bring the body in far
+# earlier, without touching the mechanical safety that limit provides.
+_BODY_ASSIST_DEADBAND = 0.22   # radians (~13 deg) of head yaw before the body helps
+_BODY_ASSIST_GAIN = 0.6        # fraction of the head's yaw the body takes over
+_BODY_ASSIST_INTERVAL = 0.7    # seconds between checks
+_BODY_ASSIST_HOLD = 1.2        # seconds automatic yaw stays off after a move
 _DOA_FACE_GRACE = 2.5        # seconds without a face before sound may steer us
 
 # --- Poses ---
@@ -148,6 +158,12 @@ class Lancer:
         # Measured once per turn from the AEC residual, then reused for every
         # sentence in that turn.
         self._barge_threshold = 0.0
+        # Automatic body yaw solves for the body on every head move, and when
+        # the head can reach a target on its own it solves for a body yaw of
+        # zero -- so it does not merely decline to help, it actively unwinds any
+        # turn we make. Off by default; body_assist_loop owns the body instead.
+        self._auto_yaw = bool(self.opt("auto_body_yaw", True))
+        self._last_body_move = 0.0
         self.cues = sounds.Cues(
             mini,
             volume=float(self.opt("thinking_sound_volume", 0.06)),
@@ -593,6 +609,155 @@ class Lancer:
         """Wrap a DoA bearing into [-pi, pi]; raw values overrun the yaw limit."""
         return (angle + math.pi) % (2 * math.pi) - math.pi
 
+    def _present_body_yaw(self) -> float | None:
+        """
+        Where the body is actually pointing, from the daemon.
+
+        The SDK exposes no getter for this, but the daemon does, and it is a
+        loopback request on the robot itself -- cheaper than the DoA read that
+        prompts it.
+        """
+        try:
+            response = requests.get(
+                "http://127.0.0.1:8000/api/state/present_body_yaw", timeout=2
+            )
+            return float(response.json())
+        except Exception:
+            return None
+
+    def sound_offset(self, angle: float) -> float:
+        """
+        Convert a DoA bearing into how far the body must turn to face it.
+
+        The ReSpeaker reports bearings in the robot's own frame, and its
+        convention is not the robot's: from the driver's own documentation,
+        "0 radians is left, pi/2 radians is front/back, pi radians is right".
+
+        The old code passed that number straight to set_target_body_yaw as an
+        absolute heading. Two errors compounding: no conversion from the mic's
+        frame to the robot's, and a bearing relative to where Lancer is
+        currently pointing treated as an absolute world heading. Someone
+        standing directly in front reads as pi/2, so Lancer would command a 90
+        degree turn away from them -- which is why turning toward speech looked
+        unreliable rather than simply wrong. It was wrong every time; it just
+        happened to land near the speaker occasionally.
+
+        Returns a signed offset: positive means turn one way, negative the
+        other. Which way is which depends on how the array is mounted, so the
+        sign is configuration rather than a constant -- flipping it is a
+        dashboard change, not a redeploy.
+        """
+        # Not _normalize()d. That wraps into [-pi, pi], which sends pi (hard
+        # right) to -pi and turns a 90 degree correction into a 270 degree one.
+        # The array reports a half circle, left through front to right, so the
+        # bearing is clamped to that range and used as it comes.
+        bearing = min(max(float(angle), 0.0), math.pi)
+        offset = (math.pi / 2) - bearing
+        return float(self.opt("doa_yaw_sign", 1.0)) * offset
+
+    def body_assist_loop(self, stop_event: threading.Event) -> None:
+        """
+        Let the body take over some of the head's rotation.
+
+        Lancer looks at people almost entirely with its head. That is not a
+        tuning accident: automatic body yaw is implemented as
+        inverse_kinematics_safe(max_relative_yaw=65 degrees), so the body only
+        contributes once the head is already 65 degrees off centre. Anyone
+        standing within that cone -- which is most of a room -- gets a robot
+        that swivels its head and keeps its body pointing wherever it was.
+
+        This watches how far the head has turned and, past a much smaller
+        threshold, rotates the body to absorb part of it and recentres the head
+        onto the same target. The person sees the whole robot turn toward them.
+
+        It reuses the DoA turn's pattern rather than inventing one: automatic
+        yaw off, move, recentre the head, automatic yaw back on after a hold.
+        That ordering matters. Automatic yaw is also what keeps the head and
+        body within their mechanical limits, so it is only ever off briefly,
+        and the head is recentred in the same breath -- which is precisely the
+        state in which the relative angle is small and the limits are not at
+        risk.
+        """
+        if not bool(self.opt("body_assist", False)):
+            logger.info("Body assist disabled by config")
+            return
+        if self._auto_yaw:
+            # Both enabled means both are solving for the body at once: assist
+            # turns it, automatic yaw unwinds it to zero, the head swings back
+            # and assist fires again. On hardware that is not a slow drift, it
+            # is the robot thrashing, so refuse the combination outright rather
+            # than let a config typo shake the machine apart.
+            logger.warning("Body assist needs auto_body_yaw off; not starting")
+            return
+
+        complained = 0.0
+        while not stop_event.is_set():
+            interval = float(self.opt("body_assist_interval", _BODY_ASSIST_INTERVAL))
+            time.sleep(interval)
+            try:
+                # Never while talking (the head is a gesture then, not a
+                # tracker) and never on top of a move that is still settling.
+                if self.speaking:
+                    continue
+                if time.monotonic() - self._last_body_move < _BODY_ASSIST_HOLD:
+                    continue
+                if time.monotonic() - self._last_turn < _DOA_MIN_INTERVAL:
+                    continue
+
+                head_yaw = self._head_yaw()
+                if head_yaw is None:
+                    continue
+                deadband = float(self.opt("body_assist_deadband",
+                                          _BODY_ASSIST_DEADBAND))
+                if abs(head_yaw) < deadband:
+                    continue
+
+                present = self._present_body_yaw()
+                if present is None:
+                    continue
+
+                # Move only part of the way. At a gain of 1 the body chases
+                # every twitch of the head and the pair oscillate; well under 1
+                # converges in two or three steps and looks deliberate.
+                gain = float(self.opt("body_assist_gain", _BODY_ASSIST_GAIN))
+                target = max(-_DOA_MAX_YAW,
+                             min(_DOA_MAX_YAW, present + head_yaw * gain))
+                if abs(target - present) < 0.05:
+                    continue
+
+                self.mini.set_automatic_body_yaw(False)
+                # body_yaw is passed explicitly. goto_target's default for it is
+                # 0.0 rather than None, so recentring the head without naming a
+                # yaw actively drives the body back to zero -- which cancelled
+                # every turn a third of a second after it started, and is the
+                # real reason Lancer looked like it only ever moved its head.
+                self.mini.goto_target(head=create_head_pose(), duration=0.35,
+                                      body_yaw=target)
+                self.request_aim_reset = True
+                self._auto_yaw_resume_at = time.monotonic() + _BODY_ASSIST_HOLD
+                logger.info("Body assist: head %+.0f deg, body %.2f -> %.2f",
+                            math.degrees(head_yaw), present, target)
+            except Exception as e:
+                if time.monotonic() - complained > 10.0:
+                    complained = time.monotonic()
+                    logger.warning("Body assist error: %s: %s",
+                                   type(e).__name__, e)
+
+    def _head_yaw(self) -> float | None:
+        """Current head yaw in radians, from its pose matrix."""
+        try:
+            pose = self.mini.get_current_head_pose()
+        except Exception:
+            return None
+        try:
+            matrix = np.asarray(pose, dtype=float)
+            if matrix.shape != (4, 4):
+                return None
+            # Standard yaw extraction from the rotation block.
+            return float(math.atan2(matrix[1, 0], matrix[0, 0]))
+        except Exception:
+            return None
+
     def doa_loop(self, stop_event: threading.Event) -> None:
         """
         Turn the body toward whoever is speaking.
@@ -609,13 +774,14 @@ class Lancer:
                 # Give the body back to vision once the turn has had time to land.
                 if (self._auto_yaw_resume_at
                         and time.monotonic() >= self._auto_yaw_resume_at):
-                    self.mini.set_automatic_body_yaw(True)
+                    self.mini.set_automatic_body_yaw(self._auto_yaw)
                     self._auto_yaw_resume_at = 0.0
 
                 result = self.mini.media.get_DoA()
                 if result is not None:
                     raw, is_speech = result
-                    angle = max(-_DOA_MAX_YAW, min(_DOA_MAX_YAW, self._normalize(raw)))
+                    # How far off the sound is from where we are facing now.
+                    offset = self.sound_offset(raw)
                     now = time.monotonic()
                     # Ignore DoA while speaking (AEC residual steers it), require
                     # a real change, and rate-limit so the body cannot jitter.
@@ -655,24 +821,41 @@ class Lancer:
                         and not self.speaking
                         and (bool(self.opt("doa_priority", True))
                              or now - self._last_face >= _DOA_FACE_GRACE)
-                        and abs(angle - self._last_yaw) >= deadband
+                        # Turn when the sound is off to one side of where we are
+                        # pointing, rather than when a bearing differs from the
+                        # last bearing we happened to act on.
+                        and abs(offset) >= deadband
                         and now - self._last_turn >= gap
                     ):
+                        present = self._present_body_yaw()
+                        if present is None:
+                            time.sleep(_DOA_INTERVAL)
+                            continue
+                        angle = max(-_DOA_MAX_YAW,
+                                    min(_DOA_MAX_YAW, present + offset))
                         # Hand the body back to us briefly, turn, then return it
                         # to vision -- two writers at once makes the IK fail.
                         # Automatic body yaw makes the body follow the head, so
                         # switching it straight back on snapped the turn away
                         # before it finished. Hold it off while we settle.
                         self.mini.set_automatic_body_yaw(False)
-                        self.mini.set_target_body_yaw(angle)
                         # Turning the body alone leaves the head pointing
-                        # wherever it last tracked someone. Centre it so the
-                        # camera actually looks where the sound came from.
-                        self.mini.goto_target(head=create_head_pose(), duration=0.4)
+                        # wherever it last tracked someone, so the head is
+                        # centred in the same move -- and the yaw is named
+                        # explicitly, because goto_target defaults body_yaw to
+                        # 0.0, not None. Without it this call drove the body
+                        # straight back to zero and undid the turn it had just
+                        # been asked to make.
+                        self.mini.goto_target(head=create_head_pose(), duration=0.4,
+                                              body_yaw=angle)
                         self.request_aim_reset = True
                         self._auto_yaw_resume_at = now + _DOA_HOLD
-                        logger.info("Turned toward speech at %.2f rad%s", angle,
-                                    " (re-acquiring)" if missed else "")
+                        logger.info(
+                            "Turned toward speech: bearing %.2f rad, %+.0f deg "
+                            "from centre, body %.2f -> %.2f%s",
+                            raw, math.degrees(offset), present, angle,
+                            " (re-acquiring)" if missed else "",
+                        )
                         self._last_yaw = angle
                         self._last_turn = now
                         sustained = 0
@@ -918,7 +1101,7 @@ class LancerApp(ReachyMiniApp):  # type: ignore[misc]
         reachy_mini.start_head_tracking(
             weight=float(cfg.get("head_tracking_weight") or 1.0)
         )
-        reachy_mini.set_automatic_body_yaw(True)
+        reachy_mini.set_automatic_body_yaw(bool(cfg.get("auto_body_yaw", True)))
 
         if not bool(cfg.get("doa_enabled", True)):
             logger.info("Audio direction tracking disabled by config")
@@ -930,6 +1113,10 @@ class LancerApp(ReachyMiniApp):  # type: ignore[misc]
             target=lancer.vision_loop, args=(stop_event,), daemon=True
         )
         vision_thread.start()
+        body_thread = threading.Thread(
+            target=lancer.body_assist_loop, args=(stop_event,), daemon=True
+        )
+        body_thread.start()
         logger.info("Audio direction tracking: on (deadband %.2f rad)", _DOA_DEADBAND)
         logger.info("Lancer ready -- server at %s", SERVER_URL)
 

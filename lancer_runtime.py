@@ -65,6 +65,22 @@ DEFAULTS: dict[str, Any] = {
     "aim_smoothing": 0.45,
     "aim_deadband_frac": 0.022,
     "doa_priority": True,
+    "doa_deadband": 0.28,
+    # Which way a positive yaw turns depends on how the mic array is mounted
+    # relative to the body. Flip this rather than redeploying if Lancer turns
+    # away from the speaker instead of toward them.
+    "doa_yaw_sign": 1.0,
+    # Automatic body yaw is the daemon solving for the body on every head move.
+    # It is what keeps head and body within their mechanical limits, so it stays
+    # on unless body_assist is deliberately taking over the body -- and the two
+    # must not both be enabled, because they fight and the robot oscillates.
+    "auto_body_yaw": True,
+    # Body assist: bring the body into a turn well before automatic body yaw's
+    # own 65-degree threshold would. Off until it is proven on hardware.
+    "body_assist": False,
+    "body_assist_deadband": 0.22,
+    "body_assist_gain": 0.6,
+    "body_assist_interval": 0.7,
     "head_tracking_weight": 1.0,
     "persona": "",
 }
@@ -126,6 +142,11 @@ LIMITS: dict[str, tuple[float, float]] = {
     "skill_timeout": (2, 60),
     "resume_grace": (0.0, 60.0),
     "thinking_sound_volume": (0.0, 0.5),   # louder trips the barge-in gate
+    "doa_deadband": (0.05, 1.5),
+    "doa_yaw_sign": (-1.0, 1.0),
+    "body_assist_deadband": (0.05, 1.2),
+    "body_assist_gain": (0.0, 1.0),        # at 1.0 the body chases every twitch
+    "body_assist_interval": (0.2, 5.0),
 }
 
 
