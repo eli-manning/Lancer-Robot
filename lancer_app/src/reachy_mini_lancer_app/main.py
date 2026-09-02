@@ -123,10 +123,16 @@ _DOA_MAX_YAW = 2.0           # radians (~115 deg); beyond this the IK refuses
 # (inverse_kinematics_safe's max_relative_yaw), which is why Lancer reads as
 # head-only for anyone standing in front of it. These bring the body in far
 # earlier, without touching the mechanical safety that limit provides.
-_BODY_ASSIST_DEADBAND = 0.22   # radians (~13 deg) of head yaw before the body helps
-_BODY_ASSIST_GAIN = 0.6        # fraction of the head's yaw the body takes over
-_BODY_ASSIST_INTERVAL = 0.7    # seconds between checks
-_BODY_ASSIST_HOLD = 1.2        # seconds automatic yaw stays off after a move
+_BODY_ASSIST_DEADBAND = 0.20   # radians (~11 deg) of head yaw before the body helps
+_BODY_ASSIST_EXIT_RATIO = 0.35  # keep going until well inside the deadband
+_BODY_ASSIST_GAIN = 0.22       # fraction of the remaining head yaw per step
+_BODY_ASSIST_MAX_STEP = 0.05   # radians per step, so ~19 deg/s at this interval
+_BODY_ASSIST_INTERVAL = 0.15   # seconds between steps; small and often is smooth
+_BODY_ASSIST_HOLD = 1.2        # seconds automatic yaw stays off after a DoA turn
+# Self-limiting: a controller that hunts, or one whose corrections never reduce
+# the head's offset, shuts itself off and gives the body back.
+_BODY_ASSIST_MAX_REVERSALS = 5
+_BODY_ASSIST_MAX_STUCK = 25
 _DOA_FACE_GRACE = 2.5        # seconds without a face before sound may steer us
 
 # --- Poses ---
@@ -691,52 +697,113 @@ class Lancer:
             return
 
         complained = 0.0
+        assisting = False
+        reversals = 0
+        last_direction = 0
+        stuck = 0
+        moves = 0
+        settled = 0
+        worst_seen = math.pi
+        logger.info("Body assist on: the body follows the head past %.0f deg",
+                    math.degrees(float(self.opt("body_assist_deadband",
+                                                _BODY_ASSIST_DEADBAND))))
+
         while not stop_event.is_set():
             interval = float(self.opt("body_assist_interval", _BODY_ASSIST_INTERVAL))
             time.sleep(interval)
             try:
+                enter = float(self.opt("body_assist_deadband",
+                                       _BODY_ASSIST_DEADBAND))
+                exit_band = enter * _BODY_ASSIST_EXIT_RATIO
+                gain = float(self.opt("body_assist_gain", _BODY_ASSIST_GAIN))
+                max_step = float(self.opt("body_assist_max_step",
+                                          _BODY_ASSIST_MAX_STEP))
+
                 # Never while talking (the head is a gesture then, not a
-                # tracker) and never on top of a move that is still settling.
+                # tracker) and never on top of a DoA turn still settling.
                 if self.speaking:
-                    continue
-                if time.monotonic() - self._last_body_move < _BODY_ASSIST_HOLD:
+                    assisting = False
                     continue
                 if time.monotonic() - self._last_turn < _DOA_MIN_INTERVAL:
+                    assisting = False
                     continue
 
                 head_yaw = self._head_yaw()
                 if head_yaw is None:
                     continue
-                deadband = float(self.opt("body_assist_deadband",
-                                          _BODY_ASSIST_DEADBAND))
-                if abs(head_yaw) < deadband:
+                # Once centred, forget how far off it ever was: the runaway
+                # guard is about a single approach, not the whole session.
+                if abs(head_yaw) < exit_band:
+                    worst_seen = math.pi
+                    stuck = 0
+                # Hysteresis. One threshold makes the controller chatter across
+                # it: nudge, drop under, stop, drift back over, nudge again.
+                # Start on a clear offset, keep going until well centred.
+                if not assisting and abs(head_yaw) < enter:
                     continue
+                if assisting and abs(head_yaw) < exit_band:
+                    assisting = False
+                    settled += 1
+                    continue
+                assisting = True
 
                 present = self._present_body_yaw()
                 if present is None:
                     continue
 
-                # Move only part of the way. At a gain of 1 the body chases
-                # every twitch of the head and the pair oscillate; well under 1
-                # converges in two or three steps and looks deliberate.
-                gain = float(self.opt("body_assist_gain", _BODY_ASSIST_GAIN))
-                target = max(-_DOA_MAX_YAW,
-                             min(_DOA_MAX_YAW, present + head_yaw * gain))
-                if abs(target - present) < 0.05:
+                # A velocity, not a destination. The previous version jumped the
+                # body most of the way in one 0.35s goto and re-centred the head
+                # in the same call, which fought the tracker and looked like a
+                # flinch. Small steps at a steady rate read as the robot turning
+                # to face you.
+                step = max(-max_step, min(max_step, head_yaw * gain))
+                target = max(-_DOA_MAX_YAW, min(_DOA_MAX_YAW, present + step))
+                if abs(target - present) < 0.005:
                     continue
 
-                self.mini.set_automatic_body_yaw(False)
-                # body_yaw is passed explicitly. goto_target's default for it is
-                # 0.0 rather than None, so recentring the head without naming a
-                # yaw actively drives the body back to zero -- which cancelled
-                # every turn a third of a second after it started, and is the
-                # real reason Lancer looked like it only ever moved its head.
-                self.mini.goto_target(head=create_head_pose(), duration=0.35,
-                                      body_yaw=target)
-                self.request_aim_reset = True
-                self._auto_yaw_resume_at = time.monotonic() + _BODY_ASSIST_HOLD
-                logger.info("Body assist: head %+.0f deg, body %.2f -> %.2f",
-                            math.degrees(head_yaw), present, target)
+                # The head is deliberately not touched. The daemon's tracker
+                # owns it and is already holding it on the person; as the body
+                # comes round underneath, the head unwinds toward centre on its
+                # own. Commanding both is what made the two fight.
+                self.mini.set_target_body_yaw(target)
+                self._last_body_move = time.monotonic()
+                moves += 1
+                if moves % 8 == 1:
+                    logger.info("Body assist: head %+.0f deg, body %.2f -> %.2f",
+                                math.degrees(head_yaw), present, target)
+
+                # Oscillation guard. If the correction keeps changing sign the
+                # controller is hunting rather than converging, and on hardware
+                # that is the robot shaking. Stand down and hand the body back
+                # rather than let it carry on -- a feature that turns itself off
+                # is recoverable, one that shakes the machine is not.
+                direction = (step > 0) - (step < 0)
+                if direction and direction == -last_direction:
+                    reversals += 1
+                    if reversals >= _BODY_ASSIST_MAX_REVERSALS:
+                        logger.error("Body assist is oscillating -- disabling it "
+                                     "and returning the body to automatic yaw")
+                        self.mini.set_automatic_body_yaw(True)
+                        return
+                elif direction:
+                    reversals = max(0, reversals - 1)
+                last_direction = direction or last_direction
+
+                # Runaway guard. Rotating the body should reduce how far the
+                # head is turned. If it never does, head pose is not measured
+                # relative to the body and this whole control loop is chasing
+                # its own tail -- stop before it winds to the limit.
+                if abs(head_yaw) > worst_seen - 0.02:
+                    stuck += 1
+                    if stuck >= _BODY_ASSIST_MAX_STUCK:
+                        logger.error("Body assist is not reducing head yaw "
+                                     "(%.2f rad after %d moves) -- disabling it",
+                                     head_yaw, moves)
+                        self.mini.set_automatic_body_yaw(True)
+                        return
+                else:
+                    stuck = 0
+                worst_seen = min(worst_seen, abs(head_yaw))
             except Exception as e:
                 if time.monotonic() - complained > 10.0:
                     complained = time.monotonic()

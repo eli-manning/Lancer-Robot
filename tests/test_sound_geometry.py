@@ -122,21 +122,9 @@ def test_head_yaw_survives_a_pose_it_cannot_read():
     assert robot._head_yaw() is None
 
 
-def test_body_assist_gain_converges_rather_than_oscillates():
-    """
-    At a gain of 1 the body chases every twitch of the head.
-
-    Simulate the loop: the body takes `gain` of the head's offset and the head
-    recentres onto the same target. Under 1 this settles; at 1 it can overshoot
-    and hunt, which on hardware reads as the robot shuddering.
-    """
-    gain = main._BODY_ASSIST_GAIN
-    assert 0.0 < gain < 1.0
-
-    remaining = 0.8                     # head is 46 degrees off centre
-    for _ in range(6):
-        remaining -= remaining * gain
-    assert abs(remaining) < 0.05, "body assist should converge within a few steps"
+def test_body_assist_gain_is_in_the_converging_range():
+    """Convergence itself is simulated properly in tests/test_body_assist.py."""
+    assert 0.0 < main._BODY_ASSIST_GAIN < 1.0
 
 
 if __name__ == "__main__":

@@ -78,9 +78,10 @@ DEFAULTS: dict[str, Any] = {
     # Body assist: bring the body into a turn well before automatic body yaw's
     # own 65-degree threshold would. Off until it is proven on hardware.
     "body_assist": False,
-    "body_assist_deadband": 0.22,
-    "body_assist_gain": 0.6,
-    "body_assist_interval": 0.7,
+    "body_assist_deadband": 0.20,
+    "body_assist_gain": 0.22,
+    "body_assist_max_step": 0.05,
+    "body_assist_interval": 0.15,
     "head_tracking_weight": 1.0,
     "persona": "",
 }
@@ -145,8 +146,9 @@ LIMITS: dict[str, tuple[float, float]] = {
     "doa_deadband": (0.05, 1.5),
     "doa_yaw_sign": (-1.0, 1.0),
     "body_assist_deadband": (0.05, 1.2),
-    "body_assist_gain": (0.0, 1.0),        # at 1.0 the body chases every twitch
-    "body_assist_interval": (0.2, 5.0),
+    "body_assist_gain": (0.0, 0.6),        # higher hunts instead of converging
+    "body_assist_max_step": (0.01, 0.2),   # radians per step; a velocity cap
+    "body_assist_interval": (0.05, 5.0),
 }
 
 
