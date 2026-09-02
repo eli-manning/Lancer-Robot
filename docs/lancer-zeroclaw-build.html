@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lancer on ZeroClaw: build report</title>
+<style>
+  :root{ --bg:#000; --ink:#fff; --dim:#9aa0a6; --line:#242424; --panel:#0d0d0d;
+         --accent:#e8913a; --ok:#3fb950; --bad:#f85149; --warn:#d29922; }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:16px/1.62 ui-sans-serif,-apple-system,"SF Pro Text",system-ui,sans-serif;
+       padding:32px 20px 96px}
+  main{max-width:860px;margin:0 auto}
+  h1{font-size:27px;margin:0 0 6px;letter-spacing:-.01em}
+  h2{font-size:19px;margin:44px 0 12px;padding-top:18px;border-top:1px solid var(--line)}
+  h3{font-size:15px;margin:26px 0 8px;color:var(--accent);letter-spacing:.02em}
+  p,li{color:#e6e6e6}
+  .sub{color:var(--dim);margin:0 0 8px}
+  code{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+       background:#141414;border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+  pre{background:var(--panel);border:1px solid var(--line);border-radius:8px;
+      padding:13px 15px;overflow-x:auto}
+  pre code{background:none;border:0;padding:0;font-size:12.5px;line-height:1.55}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:14.5px;display:block;overflow-x:auto}
+  th,td{text-align:left;padding:8px 11px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--dim);font-weight:600;font-size:12.5px;text-transform:uppercase;letter-spacing:.06em}
+  .box{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:15px 17px;margin:16px 0}
+  .box.warn{border-color:#4a3a12}
+  .box.bad{border-color:#4a1f1c}
+  .box.ok{border-color:#1c3f22}
+  .box h4{margin:0 0 7px;font-size:14px;letter-spacing:.02em}
+  .box.warn h4{color:var(--warn)} .box.bad h4{color:var(--bad)} .box.ok h4{color:var(--ok)}
+  .tag{display:inline-block;font-size:11px;letter-spacing:.05em;text-transform:uppercase;
+       border:1px solid var(--line);border-radius:999px;padding:2px 9px;color:var(--dim);margin-left:7px}
+  .ok{color:var(--ok)} .bad{color:var(--bad)} .warn{color:var(--warn)} .dim{color:var(--dim)}
+  ul,ol{padding-left:21px} li{margin:5px 0}
+  .lede{font-size:17px;color:#dcdcdc;margin:14px 0 0}
+  hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+  .k{color:var(--dim);font-size:13px}
+</style>
+</head>
+<body>
+<main>
+
+<h1>Lancer on ZeroClaw: build report</h1>
+<p class="sub">Overnight, 2 September 2026. Branch <code>zeroclaw-port</code>, two commits.</p>
+
+<p class="lede">Phase 0's three questions are now answered with measurements from
+this machine rather than estimates, and the answer to one of them changed the
+plan. The phases that follow are built and running. The part that is not ready
+is named at the bottom, with the number that says why.</p>
+
+<h2>Phase 0: the three questions</h2>
+
+<div class="box ok">
+  <h4>1. ZeroClaw builds for arm64 <span class="tag">the biggest risk, cleared</span></h4>
+  <p>Reports <code>zeroclaw 0.8.4</code>, <code>aarch64</code>, 269 MB, built from
+  vanilla upstream.</p>
+  <p>The WISS image genuinely cannot be reused, and the reason is specific: its
+  runtime stage installs <code>mssql-tools18</code> from
+  <code>packages.microsoft.com</code>, which publishes no arm64 packages. That is
+  the only hard blocker. Lancer needs none of it, and none of the four WISS
+  patches apply here either: no SQL Server, no WISS app command relay, no
+  Anthropic thinking stream, because the provider is a local Ollama. Dropping
+  all of it removes the blocker rather than working around it.</p>
+</div>
+
+<div class="box ok">
+  <h4>2. Containers reach host Ollama</h4>
+  <p>An arm64 container resolves and reads
+  <code>http://host.docker.internal:11434/api/tags</code>. The gateway is running
+  against it now, so this is confirmed by use rather than by a ping.</p>
+</div>
+
+<div class="box bad">
+  <h4>3. The 32B is the wrong call, and by more than expected</h4>
+  <p>Both models pulled and benchmarked on the same eight turns, same machine,
+  idle. Time-to-first-sentence is the number that matters, because it is how
+  long someone stands in silence before the robot starts talking.</p>
+</div>
+
+<table>
+  <tr><th>Route</th><th>Question</th><th>qwen2.5:14b</th><th>qwen2.5:32b</th></tr>
+  <tr><td>grounded</td><td>Year one fall of BASAI</td><td>11.29 s</td><td>23.13 s</td></tr>
+  <tr><td>grounded</td><td>Internship hours</td><td>6.04 s</td><td>13.61 s</td></tr>
+  <tr><td>grounded</td><td>Transfer credits</td><td>3.45 s</td><td>5.59 s</td></tr>
+  <tr><td>skill</td><td>Weather</td><td>8.05 s</td><td>17.16 s</td></tr>
+  <tr><td>skill</td><td>What day is it</td><td>3.80 s</td><td>7.30 s</td></tr>
+  <tr><td>general</td><td>Who was Alan Turing</td><td>10.57 s</td><td>15.24 s</td></tr>
+  <tr><td>creative</td><td>A joke</td><td>8.13 s</td><td>16.41 s</td></tr>
+  <tr><td>refusal</td><td>University president</td><td>5.90 s</td><td>9.77 s</td></tr>
+  <tr><td colspan="2"><strong>Median first sentence</strong></td>
+      <td><strong class="ok">7.05 s</strong></td><td><strong class="bad">14.42 s</strong></td></tr>
+  <tr><td colspan="2">Worst case</td><td>11.29 s</td><td>23.13 s</td></tr>
+</table>
+
+<p>Roughly double, across every route, and the answers are not better in kind:
+both stay grounded, both refuse the same question, the 32B's joke is funnier and
+that is about the size of it. The coder-variant question in the brief turned out
+not to matter, because the size question settles it first. The 14B stays. Both
+are pulled, so the flip is one config line if that judgement changes.</p>
+
+<h2>What Lancer can do now that it could not</h2>
+
+<h3>Call live APIs</h3>
+<p>Four skills ship, all keyless and all working: the current date and time,
+campus weather from Open-Meteo, Wikipedia lookup, and the existing hybrid
+retrieval exposed as a skill so the agent can choose to look something up.</p>
+<p>A skill is a directory with a manifest and a script. Each carries both a
+<code>skill.json</code> for the RAG server and a <code>SKILL.md</code> in
+ZeroClaw's own format, so the same directories mount into the gateway unchanged.
+They are mounted into the running container now, at the path WISS uses.</p>
+
+<div class="box warn">
+  <h4>Questions with one right source do not get a vote</h4>
+  <p>The benchmark caught the 14B answering "what day is it" with
+  <em>Wednesday, March 29, 2023</em>. Confident, well-formed, three years stale,
+  from a model that had a working clock available and chose not to call it.</p>
+  <p>Date and weather questions now fetch their source before the model is asked
+  anything. It is more reliable and it is also faster, because it drops the
+  tool-selection round trip entirely:</p>
+  <ul>
+    <li>"What day is it" <span class="dim">3.80 s to</span> <span class="ok">2.74 s</span>, and correct</li>
+    <li>"What is the weather" <span class="dim">8.05 s to</span> <span class="ok">3.01 s</span></li>
+  </ul>
+  <p>Open-ended lookups still go through model-chosen tool calling, which is what
+  it is good at.</p>
+</div>
+
+<h3>Start talking before it has finished thinking</h3>
+<p>A turn is now a stream of NDJSON frames, and each sentence is synthesised as
+the model writes it, so speech starts on sentence one instead of after the last.
+The frame names match the ones ZeroClaw already uses for the same ideas.</p>
+<pre><code>{"type":"heard",    "text":...}
+{"type":"status",   "state":"thinking"|"skill", "skill":..., "say":...}
+{"type":"sentence", "index":0, "text":..., "audio_b64":..., "last":false}
+{"type":"done",     "answer":..., "sources":[...], "unknown":false}</code></pre>
+<p>Grounding is checked per sentence rather than per answer. This is the change
+that makes streaming safe: nothing reaches the speaker until its own specifics
+have been checked against the source passages, so the guarantee is the one the
+batch path gave, applied earlier. It is stricter in practice, because a bad
+sentence is caught at sentence three instead of after the whole answer.</p>
+
+<h3>Finish a sentence it was wrongly interrupted in</h3>
+<p>The board's echo cancellation is imperfect, so a laugh, a dropped bag, or
+someone greeting a friend across the room all clear the barge-in threshold and
+stop Lancer mid-sentence. Previously that ended the answer: the rest was
+discarded and the robot went back to idle having said half a thing.</p>
+<p>Now, after an interrupt, it works out whether anyone was actually talking to
+it, using two tests that already existed rather than new guesswork:</p>
+<ul>
+  <li>nothing intelligible follows within two seconds, or the utterance fails the
+  capture gates (too short, mostly silence)</li>
+  <li>the server's addressing gate returns 204, meaning speech that was not aimed
+  at Lancer, or 422, meaning not speech at all</li>
+</ul>
+<p>Either means the interruption was not real, and the answer resumes from the
+<em>beginning of the sentence it was cut off in</em>, so it never picks up
+mid-word. Anything else is a real question and gets answered instead, with the
+unfinished answer dropped on purpose. There is a second, quieter case: when an
+answer runs past the spoken sentence limit, the remainder is kept for a few
+minutes, and "go on" or "tell me more" picks it up.</p>
+
+<h3>Say something while it works</h3>
+<p>Cues are generated with numpy, so the app stays installable with no binary
+assets: a soft two-tone pulse while the server is working, a rising chirp when it
+goes out to a live source, a falling pair when a lookup fails, a tick when speech
+is captured. Volume defaults below the echo floor the barge-in gate calibrates
+against, because a cue louder than that makes Lancer interrupt itself, which
+looks exactly like a bug and is miserable to diagnose from the outside.</p>
+
+<h3>Remember people</h3>
+<p>Postgres when it is reachable, SQLite when it is not, same schema either way.
+The fallback is not a nicety: a robot that stops working because a container is
+missing is worse than one that forgets people. Facts are pulled out with patterns
+rather than by asking a model to extract them, because on a noisy Whisper
+transcript a model invents a major and a graduation year, and a robot that
+confidently misremembers a student is worse than one that remembers nothing.</p>
+
+<h2>Three routing bugs, found by using it</h2>
+<table>
+  <tr><th>Symptom</th><th>Cause</th></tr>
+  <tr>
+    <td>"What day is it?" answered "that's outside what they gave me"</td>
+    <td>The follow-up expander treats "it" as a reference to the previous
+    question. In "what day is it" the pronoun is a placeholder with no
+    antecedent, so the question was mashed into the previous one and refused.</td>
+  </tr>
+  <tr>
+    <td>"I'm majoring in AI, what day is it?" answered neither half</td>
+    <td>One CBU-ish word anywhere in a sentence sent the whole turn to a flat
+    refusal. It now answers what it legitimately can while a per-sentence gate
+    blocks any CBU specific it tries to invent, which is the property the
+    refusal was protecting.</td>
+  </tr>
+  <tr>
+    <td>Stale date stated with confidence</td>
+    <td>Tool use left to the model's discretion. Covered above.</td>
+  </tr>
+</table>
+
+<h2>The stack</h2>
+<pre><code>macOS host (M3 Max, 64 GB)
+├─ Ollama (native, Metal)     qwen2.5:14b + embeddings
+├─ Docker: lancer-net 10.251.251.0/24
+│   ├─ zeroclaw   :8081  gateway, running, SOUL.md loaded
+│   ├─ db         :5433  postgres 16, holding memory + proposals
+│   ├─ reflect           reading transcripts, proposing nothing yet
+│   └─ chroma            defined, deliberately not started
+└─ server.py (native)   voice, retrieval, YOLO, robot control</code></pre>
+
+<p>Chroma is held back on purpose. A native <code>chroma run</code> already serves
+that port against the same SQLite-backed directory, and two servers writing it is
+how an index that took a rebuild to reach 87% top-1 becomes a restore from git.
+The cutover is one command plus a re-run of the eval.</p>
+
+<h3>Two things in config.toml that cost real time</h3>
+<div class="box warn">
+  <h4>An invalid risk profile does not fail the boot</h4>
+  <p><code>delegation_policy.mode</code> takes <code>forbidden</code> or
+  <code>allow</code>. It does not take <code>deny</code>. Setting an invalid value
+  there does not stop the gateway: the <em>entire</em> <code>risk_profiles</code>
+  section is silently reset to defaults for that run, so the profile reads as
+  though it were in force while none of it is. It surfaces only as one warning
+  line at startup. Worth knowing before someone trusts a hardened profile that
+  is not applied.</p>
+</div>
+<p>The other: <code>context_window</code> must match what the server actually
+serves. Left unset, ZeroClaw assumes 32,000 and neither side complains.</p>
+
+<h3>Identity</h3>
+<p>SOUL.md ports the persona out of three prompt constants and into prose. Before
+it, the gateway answered "say hello" in Chinese. After it, it introduces itself
+as Lancer, built by the ACM chapter, and repeats the rule that every CBU fact
+comes from a lookup.</p>
+
+<h3>The reflection loop</h3>
+<p>Running, on Postgres, reading real turns. It groups questions Lancer could not
+answer, asks the model which skills would have covered them, and writes a
+proposal plus a database row. It creates nothing: the skills volume is mounted
+read only and there is no code path to writing one. Its first cycle read 26
+turns, found 1 unanswered, and correctly proposed nothing, because one person
+asking one odd question is not a capability gap. The dashboard has approve and
+reject endpoints, and approving means "worth building", not "build it".</p>
+
+<h2>What is not ready</h2>
+
+<div class="box bad">
+  <h4>The gateway backend works and is too slow to be the default</h4>
+  <p>The bridge is built and verified end to end: sentences streamed out of
+  ZeroClaw, through the same frame protocol, with the local grounding gate
+  applied. Both backends emit the same frames, so the robot's playback code does
+  not know which produced a sentence, and the cutover is a config line.</p>
+  <p>It takes <strong>53 s a turn against 7 s native</strong>, because the
+  gateway carries a roughly 14,500-token system prompt into every message. That
+  is the next thing to fix, not something to leave for a demo day. Backend
+  defaults to <code>native</code>.</p>
+</div>
+
+<div class="box warn">
+  <h4>The robot app has not run on the robot</h4>
+  <p>The streaming playback, resume logic and cues are unit tested against a
+  faked SDK, 11 tests covering each recovery path: noise interrupt resumes,
+  unaddressed speech resumes, a real question takes over, the microphone buffer
+  is kept after an interrupt so the interrupter's first words are not lost, and
+  the cues stay under the barge-in floor with no click at the edges. That is not
+  the same as hardware. The first run on the Reachy Mini should be somewhere
+  quiet and expected to need tuning.</p>
+</div>
+
+<ul>
+  <li><strong>Body and hip movement</strong> is untouched, as the plan said it
+  should be: it is a robot-app bug, independent of the port, and worth fixing
+  before the bridge rewrite rather than during it.</li>
+  <li><strong>Chroma cutover</strong> is a deliberate one-command step, not done.</li>
+  <li><strong>Nix</strong> is not installed and not used. The stack is compose
+  for now; the flake is still worth doing for reproducibility.</li>
+</ul>
+
+<h2>Unchanged, and checked</h2>
+<ul>
+  <li><code>eval_retrieval.py</code>: <strong>87% top-1, 100% in-context</strong>,
+  the same as before any of this.</li>
+  <li>The grounding verifier, addressing gate, Whisper vocabulary, transcript
+  normalisation, tracking and DoA all moved across as they were, not rewritten.</li>
+  <li><code>/voice</code> and <code>/chat</code> still work. The old path is
+  intact, so the robot has something to fall back to.</li>
+</ul>
+
+<h2>Where to pick up</h2>
+<ol>
+  <li>Run it on the robot. Quiet room, expect to tune the barge-in headroom and
+  the cue volume against each other.</li>
+  <li>Cut the gateway's system prompt down and re-measure. If it lands near
+  native, the bridge becomes the default and the reflection loop starts earning
+  its keep.</li>
+  <li>Stop the native Chroma, start the container, re-run the eval, confirm
+  87/100 has not moved.</li>
+  <li>Fix the body movement bug.</li>
+  <li>Add the first skill that <em>acts</em> rather than reads, which is what the
+  approval tier is already sitting there waiting for.</li>
+</ol>
+
+<p class="k">Branch <code>zeroclaw-port</code>. Two commits. Retrieval, the
+verifier and the eval are unchanged; the 14B stays; everything new is additive
+and behind a config flag where it touches the working path.</p>
+
+</main>
+</body>
+</html>

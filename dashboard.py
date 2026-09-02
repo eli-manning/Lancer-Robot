@@ -83,6 +83,79 @@ async def delete_history() -> dict:
     return {"status": "ok"}
 
 
+# --- Reflection review ---------------------------------------------------
+# The reflection worker proposes skills and applies nothing. This is where a
+# human reads a proposal and decides, which is the half of that loop that makes
+# it safe to leave running next to a robot students talk to.
+
+
+def _proposals_db():
+    """Connect to the memory database the worker writes proposals into."""
+    import lancer_memory
+
+    lancer_memory.init()
+    return lancer_memory
+
+
+@router.get("/api/proposals")
+async def list_proposals(status: str = "pending") -> dict:
+    memory = _proposals_db()
+    rows = memory._execute(
+        "SELECT id, created_at, name, description, rationale, examples, "
+        "data_source, status FROM skill_proposals WHERE status = ? "
+        "ORDER BY created_at DESC LIMIT 50", (status,)
+    )
+    import json as _json
+
+    return {"proposals": [
+        {"id": r[0], "created_at": r[1], "name": r[2], "description": r[3],
+         "rationale": r[4], "examples": _json.loads(r[5] or "[]"),
+         "data_source": r[6], "status": r[7]}
+        for r in rows
+    ]}
+
+
+class ProposalReview(BaseModel):
+    status: str          # "approved" or "rejected"
+    reviewer: str = "acm"
+
+
+@router.post("/api/proposals/{proposal_id}")
+async def review_proposal(proposal_id: int, review: ProposalReview) -> dict:
+    """
+    Record a decision. Approving does not create anything.
+
+    Someone still writes the skill by hand -- approval means "this is worth
+    building", not "build it". The worker has no write access to skills/ and
+    this endpoint does not give it any.
+    """
+    if review.status not in ("approved", "rejected"):
+        raise HTTPException(status_code=400, detail="status must be approved or rejected")
+    import time
+
+    memory = _proposals_db()
+    memory._execute(
+        "UPDATE skill_proposals SET status = ?, reviewed_at = ?, reviewer = ? "
+        "WHERE id = ?", (review.status, time.time(), review.reviewer, proposal_id)
+    )
+    return {"id": proposal_id, "status": review.status}
+
+
+@router.get("/api/skills")
+async def dashboard_skills() -> dict:
+    import lancer_skills
+
+    return {"skills": lancer_skills.describe()}
+
+
+@router.get("/api/memory")
+async def dashboard_memory(subject: str = "student") -> dict:
+    import lancer_memory
+
+    return {"stats": lancer_memory.stats(),
+            "facts": lancer_memory.recall(subject, limit=25)}
+
+
 @router.get("/api/models")
 async def list_models() -> dict:
     """Ollama models available for generation (embedding models filtered out)."""
