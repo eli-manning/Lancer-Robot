@@ -103,6 +103,22 @@
 
   <div style="display:flex;flex-direction:column;gap:16px">
     <section>
+      <h2>Services
+        <span class="sp">
+          <button class="pri" onclick="allServices('start')">Start all</button>
+          <button class="danger" onclick="allServices('stop')">Stop all</button>
+          <button onclick="loadServices()">Refresh</button>
+        </span>
+      </h2>
+      <div class="body">
+        <div id="svcs" class="note">…</div>
+        <div class="note">This panel runs in the control process, not in the RAG
+          server, so it keeps working when everything else is stopped. Start order
+          is Ollama, then Chroma, then the server.</div>
+      </div>
+    </section>
+
+    <section>
       <h2>Robot
         <span class="sp">
           <button onclick="robot('start')">Start app</button>
@@ -166,7 +182,7 @@
 
 <script>
 const F = (u,o)=>fetch(u,o).then(r=>r.json());
-let CFG={}, DEF={}, MODELS=[], VOICES=[];
+let CFG={}, DEF={}, MODELS=[], VOICES=[], SVC=[];
 
 function toast(m){const t=document.getElementById('toast');t.textContent=m;
   t.classList.add('show');setTimeout(()=>t.classList.remove('show'),1800);}
@@ -324,6 +340,63 @@ async function loadTraces(){
 }
 
 setInterval(()=>{ if(document.getElementById('autotrace')?.checked) loadTraces(); }, 4000);
+// --- Services -------------------------------------------------------------
+// Status comes from the ports rather than from pidfiles, so a process started
+// in a terminal shows up here and can be stopped here.
+let SVC_LOG = null;
+
+function svcRow(s){
+  const state = s.running ? (s.ready ? 'ready' : 'starting') : 'stopped';
+  const colour = s.running ? (s.ready ? 'var(--ok)' : 'var(--accent)') : 'var(--bad)';
+  const detail = s.kind === 'compose' ? esc(s.detail || '')
+    : [s.pid ? 'pid ' + s.pid : '', s.uptime ? 'up ' + s.uptime : '',
+       s.port ? 'port ' + s.port : ''].filter(Boolean).join(' · ');
+  return `<div class="fld" style="border-left:3px solid ${colour};padding-left:10px;margin-bottom:12px">
+    <label><span class="dot ${s.running?'on':''}"></span>${esc(s.label)} — ${state}
+      ${detail?`<span class="note">${detail}</span>`:''}</label>
+    <div class="note">${esc(s.why)}</div>
+    ${s.last_log?`<pre class="note" style="margin-top:4px">${esc(s.last_log)}</pre>`:''}
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
+      <button class="pri" onclick="svc('${s.name}','start')" ${s.running?'disabled':''}>Start</button>
+      <button class="danger" onclick="svc('${s.name}','stop')" ${s.running?'':'disabled'}>Stop</button>
+      <button onclick="svc('${s.name}','restart')">Restart</button>
+      <button onclick="svcLog('${s.name}')">Logs</button>
+    </div>
+    <pre class="note" id="log_${s.name}" style="max-height:200px;overflow:auto"></pre>
+  </div>`;
+}
+
+async function loadServices(){
+  const d = await F('/api/services');
+  document.getElementById('svcs').innerHTML = d.services.map(svcRow).join('');
+  if(SVC_LOG) svcLog(SVC_LOG, true);
+  return d.services;
+}
+
+async function svc(name, action){
+  toast(name + ' ' + action + '…');
+  const r = await F(`/api/services/${name}/${action}`, {method:'POST'});
+  toast(r.detail || `${name} ${action}`);
+  loadServices();
+  // A server that is still loading models needs a second look once it is up.
+  setTimeout(loadServices, 4000);
+}
+
+async function allServices(action){
+  toast(action === 'start' ? 'starting everything…' : 'stopping everything…');
+  await F(`/api/services/all/${action}`, {method:'POST'});
+  loadServices(); setTimeout(loadServices, 5000);
+}
+
+async function svcLog(name, quiet){
+  SVC_LOG = name;
+  const box = document.getElementById('log_' + name);
+  if(!box) return;
+  const r = await F(`/api/services/${name}/log?lines=120`);
+  box.textContent = r.log || '';
+  if(!quiet) box.scrollTop = box.scrollHeight;
+}
+
 async function refreshLog(){
   const {history}=await F('/api/history?limit=100');
   const box=document.getElementById('log');
@@ -361,14 +434,17 @@ async function robot(a){toast(a+'…');
 async function setVolume(v){await fetch('/api/robot/volume?volume='+v,{method:'POST'});
   document.getElementById('volv').textContent=v;}
 async function status(){
-  const [s,st]=await Promise.all([F('/api/robot/status'),F('/api/stats')]);
+  const [s,st,svcs]=await Promise.all(
+    [F('/api/robot/status'),F('/api/stats'),loadServices()]);
+  SVC=svcs||[];
   document.getElementById('pills').innerHTML = `
     <span class="pill"><span class="dot ${s.online?'on':''}"></span>robot ${s.online?'online':'offline'}</span>
     <span class="pill">app <b>${s.app_state||'stopped'}</b></span>
     <span class="pill">motors <b>${(s.motors||'—').toString().replace('MotorControlMode.','')}</b></span>
     <span class="pill">loop <b>${s.control_hz||0} Hz</b></span>
-    <span class="pill">chunks <b>${st.chunks}</b></span>
-    <span class="pill">turns <b>${st.history_entries}</b></span>`;
+    <span class="pill">chunks <b>${st.chunks ?? '—'}</b></span>
+    <span class="pill">turns <b>${st.history_entries ?? '—'}</b></span>` +
+    SVC.map(s=>`<span class="pill"><span class="dot ${s.ready?'on':''}"></span>${esc(s.label)}</span>`).join('');
   document.getElementById('rstat').textContent =
     `${s.host} · ${s.online?('daemon '+(s.version||'')+' · wlan '+(s.wlan_ip||'—')):(s.error||'unreachable')}`;
   if(s.volume!=null){document.getElementById('vol').value=s.volume;
