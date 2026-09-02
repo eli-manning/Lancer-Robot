@@ -1672,7 +1672,10 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True):
             cfg["llm_model"], latency,
         )
 
-    yield {"type": "done", "answer": answer, "sources": sources,
+    # `heard` is repeated here even though it opened the stream: the robot logs
+    # the closing frame, and without it every line reads heard='' as though
+    # nothing was understood.
+    yield {"type": "done", "heard": heard, "answer": answer, "sources": sources,
            "unknown": unknown, "latency_ms": latency,
            "skills": [c["skill"] for c in calls],
            "more_available": bool(_remainder["text"])}
