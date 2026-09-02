@@ -143,6 +143,7 @@ _BODY_ASSIST_EXIT_RATIO = 0.35  # keep going until well inside the deadband
 # While speaking, the body still follows but waits for a bigger offset: every
 # move is motor noise reaching a microphone that is listening for an interrupt.
 _BODY_ASSIST_SPEAKING_DEADBAND = 0.38   # radians (~22 deg)
+_MOTOR_CHECK_INTERVAL = 2.0   # seconds between motor-power checks
 _BODY_ASSIST_GAIN = 0.22       # fraction of the remaining head yaw per step
 _BODY_ASSIST_MAX_STEP = 0.05   # radians per step, so ~19 deg/s at this interval
 _BODY_ASSIST_INTERVAL = 0.15   # seconds between steps; small and often is smooth
@@ -193,6 +194,9 @@ class Lancer:
         # one more move in after goto_sleep() has started and fight it on the
         # way down -- which looks like the head twitching as it folds up.
         self.stopping = False
+        # Motor power, polled and cached; see motors_live().
+        self._motors_live = True
+        self._motor_checked = 0.0
         self.cues = sounds.Cues(
             mini,
             volume=float(self.opt("thinking_sound_volume", 0.06)),
@@ -564,6 +568,8 @@ class Lancer:
                        else _YOLO_IDLE_INTERVAL)
             if self.stopping:
                 return
+            if not self.motors_live():
+                continue
             # Tracking deliberately continues while Lancer is talking. Freezing
             # it made the robot go rigid for the whole of every answer, staring
             # wherever it happened to be pointing when it started -- which is
@@ -660,6 +666,37 @@ class Lancer:
     def _normalize(angle: float) -> float:
         """Wrap a DoA bearing into [-pi, pi]; raw values overrun the yaw limit."""
         return (angle + math.pi) % (2 * math.pi) - math.pi
+
+    def motors_live(self) -> bool:
+        """
+        True when the motors are powered and worth commanding.
+
+        goto_sleep powers them down, and with them down every tracking command
+        is accepted and does nothing -- so the robot sat folded and dark while
+        the log cheerfully reported it turning toward speech. Checking the real
+        state means asleep actually means still, and it also stops the app
+        pantomiming whenever the motors are off for any other reason.
+
+        Cached: the tracking loops run several times a second and this is a
+        state that changes once a minute at most.
+        """
+        now = time.monotonic()
+        if now - self._motor_checked < _MOTOR_CHECK_INTERVAL:
+            return self._motors_live
+        self._motor_checked = now
+        try:
+            mode = requests.get("http://127.0.0.1:8000/api/motors/status",
+                                timeout=2).json().get("mode")
+            live = str(mode).lower() == "enabled"
+        except Exception:
+            # Unreachable daemon is not evidence of dead motors, and refusing to
+            # track because one status call timed out would be worse than the
+            # problem this solves.
+            live = self._motors_live
+        if live != self._motors_live:
+            logger.info("Motors are now %s", "enabled" if live else "disabled")
+        self._motors_live = live
+        return live
 
     def _present_body_yaw(self) -> float | None:
         """
@@ -767,6 +804,9 @@ class Lancer:
 
                 if self.stopping:
                     return
+                if not self.motors_live():
+                    assisting = False
+                    continue
                 # The body keeps following while Lancer talks, but lazily: every
                 # move is motor noise into a microphone that is listening for
                 # someone interrupting, so while speaking it takes a wider
@@ -924,6 +964,9 @@ class Lancer:
             try:
                 if self.stopping:
                     return
+                if not self.motors_live():
+                    time.sleep(_DOA_INTERVAL)
+                    continue
                 # Give the body back to vision once the turn has had time to land.
                 if (self._auto_yaw_resume_at
                         and time.monotonic() >= self._auto_yaw_resume_at):

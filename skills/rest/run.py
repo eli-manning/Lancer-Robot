@@ -20,6 +20,11 @@ def main() -> int:
         ok, body = robot_post("/api/move/play/goto_sleep", timeout=20)
         state = "asleep"
     elif action in ("wake", "wake_up", "get_up"):
+        # Motors first. goto_sleep powers them down once the robot is folded,
+        # and with them off wake_up is accepted and then does nothing at all --
+        # so "go to sleep" left a robot that could not be woken by asking, and
+        # looked broken rather than asleep.
+        robot_post("/api/motors/set_mode/enabled", timeout=15)
         ok, body = robot_post("/api/move/play/wake_up", timeout=20)
         state = "awake"
     else:

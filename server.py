@@ -200,9 +200,13 @@ MISS_REPLIES = [
 SOCIAL_REPLIES: list[tuple[str, str]] = [
     # First, and answered without retrieval: someone telling the robot where to
     # look wants it to look, now, not in four seconds after a document search.
+    # "wake up" is deliberately not here. It used to be, and it matched this
+    # canned reply before ever reaching the skill that actually wakes the robot
+    # -- so a sleeping Lancer would cheerfully say "Over here? Got it" and stay
+    # folded up, which reads as broken rather than asleep.
     (r"\b(look (at me|over here|here|this way|at this)|over here|"
      r"turn (around|toward|towards|to me|this way)|face me|face this way|"
-     r"watch me|pay attention|wake up|come here)\b",
+     r"watch me|pay attention|come here)\b",
      "Over here? Got it. What do you need?"),
     (r"\b((stop|quit) (talking|it)|be quiet|shut up|never ?mind|forget it)\b",
      "Fine. I'll be here."),
@@ -1466,6 +1470,50 @@ SKILLS_BY_MODE = {
 }
 
 
+# --- Sleep ---------------------------------------------------------------
+# Asleep means asleep: the microphone is still running, but nothing said near
+# Lancer gets answered until it is woken by name. Without this, telling it to go
+# to sleep produced a robot that was folded up, motorless and still cheerfully
+# replying to every conversation in the room.
+
+_sleep_state = {"asleep": False}
+
+# What it takes to wake it. Its own name counts, so "Lancer?" works the way
+# saying someone's name works, and so does simply telling it to wake up.
+_WAKE_RE = _re.compile(
+    r"\b(lancer|reachy|wake up|wake|get up|rise and shine|good morning)\b",
+    _re.I,
+)
+
+
+def is_asleep() -> bool:
+    return bool(_sleep_state["asleep"])
+
+
+def wake_robot() -> None:
+    """Bring the robot back up and start answering again."""
+    _sleep_state["asleep"] = False
+    logger.info("Waking up")
+    threading.Thread(
+        target=skills.run_skill, args=("rest", {"action": "wake"}), daemon=True
+    ).start()
+
+
+def note_sleep_change(calls: list[dict]) -> None:
+    """Track sleep state from whatever the rest skill actually did."""
+    for call in calls:
+        if call.get("skill") != "rest":
+            continue
+        result = call.get("result") or {}
+        if not result.get("ok"):
+            continue
+        if result.get("state") == "asleep":
+            _sleep_state["asleep"] = True
+            logger.info("Going to sleep -- ignoring speech until woken by name")
+        elif result.get("state") == "awake":
+            _sleep_state["asleep"] = False
+
+
 def react(emotion: str) -> None:
     """
     Fire a gesture without asking the model for permission or waiting for it.
@@ -1891,6 +1939,7 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True,
                        "say": getattr(skill, "spoken_wait", None),
                        "ok": bool(call["result"].get("ok"))}
             if calls:
+                note_sleep_change(calls)
                 clock = stage(trace, "skills", clock,
                               called=[c["skill"] for c in calls])
 
@@ -2038,6 +2087,19 @@ async def voice_stream(file: UploadFile = File(...), face: bool = False):
         logger.info("[stream] normalized %r -> %r", raw_heard, heard)
         clock = stage(trace, "normalise transcript", clock,
                       before=raw_heard, after=heard)
+
+    # Asleep is asleep. The microphone keeps running, but nothing gets answered
+    # until Lancer is woken by name -- otherwise "go to sleep" leaves a folded,
+    # motorless robot still replying to every conversation in the room.
+    if is_asleep():
+        if not _WAKE_RE.search(heard):
+            logger.info("[stream] asleep, ignoring: %r", heard)
+            stage(trace, "asleep", clock, heard=heard)
+            _traces.appendleft(trace)
+            raise HTTPException(status_code=204, detail="asleep")
+        logger.info("[stream] woken by %r", heard)
+        wake_robot()
+        clock = stage(trace, "woken", clock, heard=heard)
 
     addressed, reason = is_addressed(heard, face)
     trace["addressed"] = addressed
