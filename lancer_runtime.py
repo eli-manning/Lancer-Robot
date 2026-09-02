@@ -70,6 +70,10 @@ DEFAULTS: dict[str, Any] = {
     # relative to the body. Flip this rather than redeploying if Lancer turns
     # away from the speaker instead of toward them.
     "doa_yaw_sign": 1.0,
+    # Share of a sound-turn the head takes. Zero: the daemon tracker overwrites
+    # head poses within a frame, so any share here is simply taken away from the
+    # body, which is the only actuator whose turn persists.
+    "doa_head_share": 0.0,
     # Automatic body yaw is the daemon solving for the body on every head move.
     # It is what keeps head and body within their mechanical limits, so it stays
     # on unless body_assist is deliberately taking over the body -- and the two
@@ -145,6 +149,7 @@ LIMITS: dict[str, tuple[float, float]] = {
     "thinking_sound_volume": (0.0, 0.5),   # louder trips the barge-in gate
     "doa_deadband": (0.05, 1.5),
     "doa_yaw_sign": (-1.0, 1.0),
+    "doa_head_share": (0.0, 1.0),
     "body_assist_deadband": (0.05, 1.2),
     "body_assist_gain": (0.0, 0.6),        # higher hunts instead of converging
     "body_assist_max_step": (0.01, 0.2),   # radians per step; a velocity cap

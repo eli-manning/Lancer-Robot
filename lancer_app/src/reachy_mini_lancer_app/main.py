@@ -117,6 +117,21 @@ _AIM_DEADBAND_FRAC = 0.022   # of frame width -- below this, do not move
 _AIM_MIN_INTERVAL = 0.18     # seconds between commanded moves
 _AIM_RESET_AFTER = 1.5       # seconds of no detection before the filter resets
 _DOA_MAX_YAW = 2.0           # radians (~115 deg); beyond this the IK refuses
+# How much of a turn toward a voice the head takes before the body is asked for
+# any of it.
+#
+# Zero by default, and that is not timidity. The daemon's head tracker owns the
+# head and rewrites its pose several times a second, so a head angle commanded
+# here survives for about one frame before being pulled back to whatever the
+# face detector last saw -- and with the face detector finding almost nobody,
+# that is centre. Giving the head a share therefore does not make it lead the
+# turn, it just takes that share away from the body, which is the one actuator
+# whose position actually persists. Setting this above zero measurably stopped
+# Lancer turning toward speech at all.
+#
+# Making the head genuinely lead needs the tracker suspended for the duration
+# of the turn, which is a larger change than a constant.
+_DOA_HEAD_SHARE = 0.0        # radians
 
 # --- Body assist ---
 # Automatic body yaw only involves the body past 65 degrees of head rotation
@@ -170,6 +185,11 @@ class Lancer:
         # turn we make. Off by default; body_assist_loop owns the body instead.
         self._auto_yaw = bool(self.opt("auto_body_yaw", True))
         self._last_body_move = 0.0
+        # Set before the robot is put to sleep. The tracking loops each sleep
+        # for a fraction of a second between checks, so without this they get
+        # one more move in after goto_sleep() has started and fight it on the
+        # way down -- which looks like the head twitching as it folds up.
+        self.stopping = False
         self.cues = sounds.Cues(
             mini,
             volume=float(self.opt("thinking_sound_volume", 0.06)),
@@ -514,6 +534,7 @@ class Lancer:
         aim_u = aim_v = None          # smoothed target
         sent_u = sent_v = None        # last position actually commanded
         last_move = 0.0
+        last_aim_complaint = 0.0
         while not stop_event.is_set():
             # YuNet runs on the robot with no network hop, so it is much lower
             # latency than shipping a frame to the Mac and back. Let it lead and
@@ -538,6 +559,8 @@ class Lancer:
 
             time.sleep(_TRACK_INTERVAL if self.vision_mode == "yolo"
                        else _YOLO_IDLE_INTERVAL)
+            if self.stopping:
+                return
             if self.speaking:
                 continue
             try:
@@ -578,13 +601,31 @@ class Lancer:
                 )
                 if moved_enough and now - last_move >= _AIM_MIN_INTERVAL:
                     try:
-                        self.mini.look_at_image(
-                            int(aim_u), int(aim_v), duration=_TRACK_AIM_DURATION
+                        # look_at_image would move the head itself, but it goes
+                        # through look_at_world, which calls goto_target without
+                        # naming a body yaw -- and that parameter defaults to
+                        # 0.0, not None. Every tracking update therefore drove
+                        # the body back to centre, several times a second, which
+                        # is why a turn toward a voice looked like it started
+                        # and then gave up. Ask it for the pose only, and issue
+                        # the move with the body yaw named.
+                        pose = self.mini.look_at_image(
+                            int(aim_u), int(aim_v),
+                            duration=_TRACK_AIM_DURATION,
+                            perform_movement=False,
+                        )
+                        present = self._present_body_yaw()
+                        self.mini.goto_target(
+                            head=pose, duration=_TRACK_AIM_DURATION,
+                            body_yaw=present if present is not None else None,
                         )
                         sent_u, sent_v = aim_u, aim_v
                         last_move = now
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        if now - last_aim_complaint > 10.0:
+                            last_aim_complaint = now
+                            logger.warning("Head aim failed: %s: %s",
+                                           type(e).__name__, e)
             elif now - self._last_person >= _TRACK_FALLBACK_AFTER:
                 if self.vision_mode != "yunet":
                     self.mini.start_head_tracking(
@@ -719,6 +760,8 @@ class Lancer:
                 max_step = float(self.opt("body_assist_max_step",
                                           _BODY_ASSIST_MAX_STEP))
 
+                if self.stopping:
+                    return
                 # Never while talking (the head is a gesture then, not a
                 # tracker) and never on top of a DoA turn still settling.
                 if self.speaking:
@@ -872,6 +915,8 @@ class Lancer:
         complained = 0.0
         while not stop_event.is_set():
             try:
+                if self.stopping:
+                    return
                 # Give the body back to vision once the turn has had time to land.
                 if (self._auto_yaw_resume_at
                         and time.monotonic() >= self._auto_yaw_resume_at):
@@ -940,21 +985,38 @@ class Lancer:
                         # switching it straight back on snapped the turn away
                         # before it finished. Hold it off while we settle.
                         self.mini.set_automatic_body_yaw(False)
-                        # Turning the body alone leaves the head pointing
-                        # wherever it last tracked someone, so the head is
-                        # centred in the same move -- and the yaw is named
-                        # explicitly, because goto_target defaults body_yaw to
-                        # 0.0, not None. Without it this call drove the body
-                        # straight back to zero and undid the turn it had just
-                        # been asked to make.
-                        self.mini.goto_target(head=create_head_pose(), duration=0.4,
-                                              body_yaw=angle)
+                        # The head leads and the body follows, which is what a
+                        # person does when a voice comes from off to one side:
+                        # the head snaps round first because it is light, and
+                        # the body catches up.
+                        #
+                        # Previously the head was centred on the body and only
+                        # the body turned, so the head never appeared to react
+                        # to sound at all -- it sat still until the camera
+                        # happened to find a face. Now the head takes as much of
+                        # the angle as it can reach and the body takes only the
+                        # remainder, with body_assist bringing the rest round
+                        # over the next second and unwinding the head as it goes.
+                        #
+                        # body_yaw is named explicitly because goto_target
+                        # defaults it to 0.0, not None: omitting it drove the
+                        # body to zero and undid the turn.
+                        share = float(self.opt("doa_head_share", _DOA_HEAD_SHARE))
+                        head_share = max(-share, min(share, offset))
+                        angle = max(-_DOA_MAX_YAW,
+                                    min(_DOA_MAX_YAW, present + offset - head_share))
+                        self.mini.goto_target(
+                            head=self._rotate_pose_z(create_head_pose(), head_share),
+                            duration=0.25,
+                            body_yaw=angle,
+                        )
                         self.request_aim_reset = True
                         self._auto_yaw_resume_at = now + _DOA_HOLD
                         logger.info(
                             "Turned toward speech: bearing %.2f rad, %+.0f deg "
-                            "from centre, body %.2f -> %.2f%s",
-                            raw, math.degrees(offset), present, angle,
+                            "from centre, head %+.0f deg, body %.2f -> %.2f%s",
+                            raw, math.degrees(offset), math.degrees(head_share),
+                            present, angle,
                             " (re-acquiring)" if missed else "",
                         )
                         self._last_yaw = angle
@@ -1246,11 +1308,30 @@ class LancerApp(ReachyMiniApp):  # type: ignore[misc]
                 finally:
                     lancer.answering()
         finally:
+            # Take the head away from everything that steers it before folding
+            # the robot up. Each tracking loop sleeps a fraction of a second
+            # between checks, so simply setting stop_event leaves them able to
+            # issue one more move -- landing in the middle of goto_sleep() and
+            # fighting it, which is the head twitching on the way down.
+            lancer.stopping = True
+            for thread in (doa_thread, vision_thread, body_thread):
+                try:
+                    thread.join(timeout=1.5)
+                except Exception:
+                    pass
             try:
                 reachy_mini.set_automatic_body_yaw(False)
             except Exception:
                 pass
             reachy_mini.stop_head_tracking()
+            # The daemon's own face tracker is a separate thing from the app's
+            # loops and keeps driving the head after they are gone. The app
+            # turns it on at startup, so it turns it off here.
+            try:
+                requests.post("http://127.0.0.1:8000/api/media/tracking/disable",
+                              json={}, timeout=4)
+            except Exception as e:
+                logger.debug("Could not disable face detector: %s", e)
             for cleanup in (
                 reachy_mini.media.stop_recording,
                 reachy_mini.goto_sleep,

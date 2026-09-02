@@ -543,6 +543,50 @@ def _select_context(
     return chosen or candidates[:1]
 
 
+# Populated by the last retrieve() call, read by the debug view. One robot, one
+# conversation at a time, so a single slot is enough.
+_last_retrieval: dict = {}
+
+
+def _chunk_summary(doc: str, meta: dict, lookup: dict) -> dict:
+    source = str((meta or lookup.get(doc, {})).get("source", "unknown"))
+    return {
+        "source": source.split("/")[-1],
+        "full_source": source,
+        "preview": doc.strip()[:260],
+        "chars": len(doc),
+    }
+
+
+def _drop_reason(doc, docs, candidates, scores, best_score, lookup, cfg) -> str:
+    """
+    Why a reranked chunk did not make it into the prompt.
+
+    _select_context applies three filters in order and says nothing about which
+    one fired. Reconstructing that here is what turns "the answer was wrong"
+    into "the right chunk was cut for exceeding two per document".
+    """
+    if doc in docs:
+        return ""
+    score = scores.get(doc)
+    if best_score is not None and score is not None and score < best_score - SCORE_MARGIN:
+        return f"score {score:.1f} is more than {SCORE_MARGIN} below the top hit"
+    source = str(lookup.get(doc, {}).get("source", ""))
+    kept_from_source = sum(
+        1 for d in docs if str(lookup.get(d, {}).get("source", "")) == source
+    )
+    if kept_from_source >= MAX_PER_SOURCE:
+        return f"already had {MAX_PER_SOURCE} chunks from this document"
+    tokens = _tokens(doc)
+    for kept in docs:
+        other = _tokens(kept)
+        if tokens and len(tokens & other) / max(len(tokens | other), 1) >= DEDUP_OVERLAP:
+            return "mostly repeats a chunk already selected"
+    if len(docs) >= int(cfg["top_k"]):
+        return f"top_k is {cfg['top_k']} and it was already full"
+    return "not selected"
+
+
 def retrieve(query: str) -> tuple[str, list[str], bool, float | None]:
     """
     Hybrid retrieval: dense + BM25, combined with Reciprocal Rank Fusion.
@@ -587,6 +631,31 @@ def retrieve(query: str) -> tuple[str, list[str], bool, float | None]:
 
     sources = [lookup[doc].get("source", "unknown") for doc in docs]
     relevant = best_score is None or best_score >= float(cfg["relevance_min"])
+
+    # Everything the ranking decided, kept for the debug view. Retrieval is the
+    # part of this system most often blamed and least often inspected: without
+    # the scores and the drops it is impossible to tell a bad answer caused by
+    # a missing document from one caused by a chunk that ranked third.
+    _last_retrieval.clear()
+    _last_retrieval.update({
+        "query": query,
+        "dense_hits": [_chunk_summary(d, m, lookup) for d, m in dense[:8]],
+        "lexical_hits": [_chunk_summary(d, m, lookup) for d, m in lexical[:8]],
+        "fused_count": len(fused),
+        "reranked": [
+            {**_chunk_summary(doc, lookup.get(doc, {}), lookup),
+             "score": round(scores_by_doc[doc], 2) if doc in scores_by_doc else None,
+             "selected": doc in docs,
+             "dropped_because": _drop_reason(doc, docs, candidates, scores_by_doc,
+                                             best_score, lookup, cfg)}
+            for doc in candidates[:10]
+        ],
+        "best_score": round(best_score, 2) if best_score is not None else None,
+        "relevance_min": float(cfg["relevance_min"]),
+        "relevant": relevant,
+        "selected_sources": sources,
+        "rerank_enabled": bool(cfg["rerank_enabled"]),
+    })
     logger.info(
         "Retrieved %d chunks (dense=%d lexical=%d fused=%d best=%.2f relevant=%s)",
         len(docs), len(rankings[0]), len(rankings[1]), len(fused),
@@ -1443,6 +1512,35 @@ async def _iter_in_thread(make_generator):
         yield item
 
 
+# --- Turn tracing ---------------------------------------------------------
+# Every decision a turn makes, kept so the dashboard can show why an answer came
+# out the way it did. Debugging this pipeline from logs means correlating the
+# addressing gate, three retrieval stages, a skill call and a per-sentence
+# grounding check across interleaved lines; having the turn as one object is the
+# difference between reading it and reconstructing it.
+
+from collections import deque                          # noqa: E402
+
+TRACE_LIMIT = 25
+_traces: deque = deque(maxlen=TRACE_LIMIT)
+
+
+def new_trace(**fields) -> dict:
+    return {"ts": time.time(), "stages": [], "sentences": [], "skills": [],
+            "retrieval": {}, **fields}
+
+
+def stage(trace: dict | None, name: str, started: float, **detail) -> float:
+    """Record how long a stage took and what it decided. Returns a fresh clock."""
+    if trace is not None:
+        trace["stages"].append({
+            "name": name,
+            "ms": int((time.monotonic() - started) * 1000),
+            **detail,
+        })
+    return time.monotonic()
+
+
 # What was written but not said, kept so "go on" can pick it back up. Held for
 # a few minutes: long enough for someone to ask, short enough that the answer
 # to a question two conversations ago never resurfaces.
@@ -1488,7 +1586,8 @@ def _sync_gateway_sentences(text: str):
         loop.close()
 
 
-async def voice_frames(heard: str, face: bool = False, speak: bool = True):
+async def voice_frames(heard: str, face: bool = False, speak: bool = True,
+                       trace: dict | None = None):
     """
     Produce the frames for one turn.
 
@@ -1500,10 +1599,16 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True):
 
     cfg = rt.load()
     started = _time.monotonic()
+    clock = started
+    if trace is None:
+        trace = new_trace(heard=heard)
+    _traces.appendleft(trace)
     yield {"type": "heard", "text": heard}
 
     if cfg.get("memory_enabled", True):
-        await asyncio.to_thread(memory.learn_from, heard)
+        learned = await asyncio.to_thread(memory.learn_from, heard)
+        clock = stage(trace, "memory recall", clock, learned=learned,
+                      known=memory.recall(limit=6))
 
     # "Go on" is not a question -- it is a request for the part that got cut
     # off. Answering it through retrieval produces a non-sequitur.
@@ -1515,6 +1620,12 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True):
     else:
         yield {"type": "status", "state": "thinking"}
         plan = await asyncio.to_thread(plan_turn, heard, _history, face)
+        trace["route"] = plan["mode"]
+        trace["retrieval"] = dict(_last_retrieval)
+        trace["expanded_query"] = contextualize(heard, _history)
+        clock = stage(trace, "route + retrieval", clock, route=plan["mode"],
+                      verify=plan.get("verify", "none"),
+                      sources=plan.get("sources", []))
 
     max_sentences = int(cfg["max_sentences"])
     spoken: list[str] = []
@@ -1601,9 +1712,19 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True):
                 )
             for call in calls:
                 skill = skills.load_skills().get(call["skill"])
+                trace["skills"].append({
+                    "skill": call["skill"],
+                    "arguments": call["arguments"],
+                    "chosen_by": "rule" if call["skill"] in required else "model",
+                    "ok": bool(call["result"].get("ok")),
+                    "result": json.dumps(call["result"])[:900],
+                })
                 yield {"type": "status", "state": "skill", "skill": call["skill"],
                        "say": getattr(skill, "spoken_wait", None),
                        "ok": bool(call["result"].get("ok"))}
+            if calls:
+                clock = stage(trace, "skills", clock,
+                              called=[c["skill"] for c in calls])
 
         verify = plan.get("verify", "none")
         context = plan.get("context", "")
@@ -1620,6 +1741,12 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True):
                     # Stop here rather than speak it. Everything already said
                     # passed the same check, so the answer stays honest; it just
                     # ends earlier than the model intended.
+                    trace["sentences"].append({
+                        "index": index, "text": sentence, "spoken": False,
+                        "verdict": "blocked",
+                        "claims": [str(c) for c in
+                                   _unsupported_claims(sentence, context)[:5]],
+                    })
                     sentence = (_random.choice(MISS_REPLIES) if verify == "guarded"
                                 else CUT_SHORT)
                     yield await sentence_frame(sentence, index, last=True)
@@ -1633,8 +1760,19 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True):
                     _remainder["text"] = (_remainder["text"] + " " + sentence).strip()
                     _remainder["at"] = _time.time()
                     truncated = True
+                    trace["sentences"].append({
+                        "index": index, "text": sentence, "spoken": False,
+                        "verdict": "held for \"go on\"", "claims": [],
+                    })
                     continue
+                synth = _time.monotonic()
                 yield await sentence_frame(sentence, index)
+                trace["sentences"].append({
+                    "index": index, "text": sentence, "spoken": True,
+                    "verdict": "grounded" if verify != "none" else "no check",
+                    "claims": [],
+                    "synth_ms": int((_time.monotonic() - synth) * 1000),
+                })
                 spoken.append(sentence)
                 index += 1
         except Exception as e:
@@ -1675,6 +1813,10 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True):
     # `heard` is repeated here even though it opened the stream: the robot logs
     # the closing frame, and without it every line reads heard='' as though
     # nothing was understood.
+    stage(trace, "total", started)
+    trace.update({"answer": answer, "sources": sources, "unknown": unknown,
+                  "latency_ms": latency, "model": cfg["llm_model"]})
+
     yield {"type": "done", "heard": heard, "answer": answer, "sources": sources,
            "unknown": unknown, "latency_ms": latency,
            "skills": [c["skill"] for c in calls],
@@ -1692,21 +1834,38 @@ async def voice_stream(file: UploadFile = File(...), face: bool = False):
     """
     from fastapi.responses import StreamingResponse
 
+    clock = time.monotonic()
     with tempfile.TemporaryDirectory() as tmp:
         wav_path = Path(tmp) / "in.wav"
-        wav_path.write_bytes(await file.read())
+        audio = await file.read()
+        wav_path.write_bytes(audio)
         heard = await asyncio.to_thread(transcribe, str(wav_path))
+
+    trace = new_trace(heard=heard, source="voice", face_present=face,
+                      audio_seconds=round(len(audio) / (16000 * 2), 2))
+    clock = stage(trace, "transcribe", clock, text=heard,
+                  model=rt.get("whisper_model"))
 
     if not heard or is_artifact(heard):
         logger.info("[stream] discarding non-speech transcript: %r", heard)
+        stage(trace, "discarded", clock, why="Whisper filler or too short")
+        _traces.appendleft(trace)
         raise HTTPException(status_code=422, detail="No usable speech")
 
     raw_heard = heard
     heard = normalize_transcript(heard)
+    trace["heard_raw"] = raw_heard
+    trace["heard"] = heard
     if heard != raw_heard:
         logger.info("[stream] normalized %r -> %r", raw_heard, heard)
+        clock = stage(trace, "normalise transcript", clock,
+                      before=raw_heard, after=heard)
 
     addressed, reason = is_addressed(heard, face)
+    trace["addressed"] = addressed
+    trace["addressed_reason"] = reason
+    clock = stage(trace, "addressing gate", clock,
+                  addressed=addressed, reason=reason, face_present=face)
     # A follow-up like "go on" is three words with no question mark, which the
     # addressing gate rejects on its own -- but it is unambiguously aimed at the
     # robot when the robot was just cut off mid-answer.
