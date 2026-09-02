@@ -25,29 +25,31 @@ pip install -r requirements.txt
 
 ## Every session
 
-Open 3 terminal tabs in this directory.
+One command, one tab:
 
-**Tab 1 — ChromaDB**
 ```bash
-source .venv/bin/activate
+./lancer
+```
+
+That starts the control panel on <http://localhost:7871>. Everything else —
+Ollama, Chroma, the RAG server, the ZeroClaw stack — is started, stopped,
+restarted and tailed from the **Services** panel in that page, along with the
+robot app itself.
+
+The control panel is deliberately a separate process from the RAG server. The
+dashboard used to be served by the server, which meant stopping the server also
+took away the page you would use to start it again.
+
+If you would rather run the pieces by hand, they are ordinary commands:
+
+```bash
 chroma run --host localhost --port 8001 --path ./chroma_data
+uvicorn server:app --host 0.0.0.0 --port 7870
+python tui_chat.py 2>/dev/null      # terminal chat, no robot needed
 ```
 
-**Tab 2 — RAG Server**
-```bash
-source .venv/bin/activate
-uvicorn server:app --host 0.0.0.0 --port 7860
-```
-
-**Tab 3 — TUI chat** (or your workspace)
-```bash
-source .venv/bin/activate
-python tui_chat.py 2>/dev/null
-```
-
-The `2>/dev/null` suppresses Ollama's llama.cpp loader logs which would otherwise clutter the chat output.
-
-Ollama runs in the background automatically via brew services — no tab needed.
+Anything started that way still shows up in the Services panel and can be
+stopped from it — status is read from the ports, not from our own bookkeeping.
 
 ---
 

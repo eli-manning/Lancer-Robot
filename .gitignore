@@ -241,3 +241,6 @@ stack/workspace/
 # API keys for hosted model providers -- never committed
 lancer_secrets.json
 .env
+
+# Supervisor pidfiles and service logs
+.run/

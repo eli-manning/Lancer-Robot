@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Start the Lancer control panel. This is the only thing you launch by hand --
+# Ollama, Chroma, the RAG server and the ZeroClaw stack are all started and
+# stopped from the dashboard it serves.
+set -euo pipefail
+cd "$(dirname "$0")"
+PORT="${LANCER_CONTROL_PORT:-7871}"
+[ -x .venv/bin/uvicorn ] || { echo "no .venv here -- run pip install -r requirements.txt first"; exit 1; }
+IP="$(ipconfig getifaddr en0 2>/dev/null || echo localhost)"
+echo "Lancer control panel:  http://localhost:$PORT   (http://$IP:$PORT from another device)"
+exec .venv/bin/uvicorn lancer_control:app --host 0.0.0.0 --port "$PORT"
