@@ -38,6 +38,20 @@ MAX_RESULT_CHARS = 4000     # what comes back gets read by a model, not a human
 # from imagination, or it calls the same skill forever. Cap the iterations.
 MAX_TOOL_ITERATIONS = 4
 
+# Risk tiers that run without asking.
+#
+#   read   -- looks something up and changes nothing
+#   motion -- moves the robot on its own desk: a nod, a look, an emotion. It is
+#             physical, so it is not "read", but nothing it does persists or
+#             reaches anyone else, and requiring approval to nod would make the
+#             gesture arrive long after the sentence it belonged to.
+#
+# Anything that acts on the world -- writes a file, sends a message, calls an
+# API that changes something -- gets no tier here and must be approved. Nothing
+# shipped today is in that category; the gate exists so the first skill that is
+# does not quietly inherit a nod's permissions.
+AUTO_APPROVED_RISKS = {"read", "motion"}
+
 
 class Skill:
     """One loaded skill directory."""
@@ -75,7 +89,7 @@ class Skill:
         Errors are returned rather than raised: the model is the caller here,
         and it handles "that lookup failed" far better than the turn dying.
         """
-        if self.risk != "read" and not approve:
+        if self.risk not in AUTO_APPROVED_RISKS and not approve:
             return {"ok": False, "error": "approval_required", "risk": self.risk}
 
         script = self.path / self.entrypoint

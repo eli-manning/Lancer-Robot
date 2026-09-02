@@ -41,6 +41,9 @@ DEFAULTS: dict[str, Any] = {
     # the other is this line.
     "conversation_backend": "native",
     "skills_enabled": True,
+    # Gestures fired by rule rather than by tool call: confused when it does not
+    # know, welcoming when greeted. No latency cost, works on every route.
+    "auto_react": True,
     "skill_timeout": 12,
     "memory_enabled": True,
     "stream_enabled": True,

@@ -1,0 +1,15 @@
+{
+  "name": "play_emotion",
+  "description": "Move the robot's head and body to express something physically -- nod yes, shake no, look curious, laugh, look confused, celebrate, greet someone. Use it alongside your spoken answer whenever a gesture would make you feel less like a speaker on a desk: nod when you agree, look confused when a question is unclear, welcome someone who just walked up. Do not narrate the gesture; just do it and keep talking.",
+  "risk": "motion",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "emotion": {
+        "type": "string",
+        "description": "Plain word for the expression: yes, no, curious, confused, happy, laughing, surprised, proud, sad, tired, welcoming, thanks, sorry, thinking, celebrate, dance. Exact library names like 'curious1' also work."
+      }
+    },
+    "required": ["emotion"]
+  }
+}

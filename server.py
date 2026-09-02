@@ -1311,11 +1311,35 @@ async def voice(file: UploadFile = File(...), face: bool = False):
 # gets none: its retrieval is measured at 87% top-1 and a model that can choose
 # whether to look something up is a model that can choose not to.
 SKILLS_BY_MODE = {
-    "general": ["current_datetime", "weather", "web_lookup"],
-    "guarded": ["current_datetime", "weather", "web_lookup"],
-    "creative": ["current_datetime", "weather"],
+    "general": ["current_datetime", "weather", "web_lookup", "play_emotion", "rest"],
+    "guarded": ["current_datetime", "weather", "web_lookup", "play_emotion", "rest"],
+    "creative": ["current_datetime", "weather", "play_emotion"],
+    # The grounded route still gets no tools. Offering them costs a whole extra
+    # model round trip before the first word, and this is the route where the
+    # answer matters most and the retrieval is already measured. Gestures on
+    # this route come from react() below, which costs nothing.
     "grounded": [],
 }
+
+
+def react(emotion: str) -> None:
+    """
+    Fire a gesture without asking the model for permission or waiting for it.
+
+    Some reactions do not need judgement: not knowing something looks confused,
+    being greeted looks welcoming. Deciding those by rule rather than by tool
+    call means they cost no latency at all, and they land on the grounded route
+    too, which deliberately has no tools.
+
+    Fire and forget on a thread: a gesture that delayed the sentence it belongs
+    to would be worse than no gesture.
+    """
+    if not bool(rt.load().get("auto_react", True)):
+        return
+    threading.Thread(
+        target=skills.run_skill, args=("play_emotion", {"emotion": emotion}),
+        daemon=True,
+    ).start()
 
 # Some questions have exactly one right source and no judgement to exercise.
 # Leaving those to the model's discretion is how "what day is it?" came back as
@@ -1795,6 +1819,16 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True,
 
     unknown = (plan.get("mode") == "miss"
                or "don't have that specific information" in answer)
+
+    # React physically to how the turn went. Only two cases are unambiguous
+    # enough to be worth doing by rule; everything else is left to the model,
+    # which can read the room better than a regex can.
+    if unknown or plan.get("mode") in ("miss", "guarded") and not answer:
+        react("confused")
+    elif plan.get("mode") == "social" and _re.search(
+            r"^\s*(hey|hi|hello|yo|howdy|good (morning|afternoon|evening))\b",
+            heard, _re.I):
+        react("welcoming")
     latency = int((_time.monotonic() - started) * 1000)
 
     _history.append({"role": "user", "content": heard})

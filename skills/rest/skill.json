@@ -1,0 +1,16 @@
+{
+  "name": "rest",
+  "description": "Put the robot to sleep, or wake it up. Use only when someone actually asks -- 'go to sleep', 'take a nap', 'wake up', 'you can rest now'. Going to sleep folds the head down and stops tracking, so never do it on your own initiative in the middle of a conversation.",
+  "risk": "motion",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": ["sleep", "wake"],
+        "description": "sleep folds the robot down; wake brings it back up."
+      }
+    },
+    "required": ["action"]
+  }
+}
