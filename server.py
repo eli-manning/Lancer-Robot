@@ -198,6 +198,14 @@ MISS_REPLIES = [
 # Small talk should never hit retrieval. Refusing "hey" with a database
 # disclaimer is the single most robot-sounding thing Lancer could do.
 SOCIAL_REPLIES: list[tuple[str, str]] = [
+    # First, and answered without retrieval: someone telling the robot where to
+    # look wants it to look, now, not in four seconds after a document search.
+    (r"\b(look (at me|over here|here|this way|at this)|over here|"
+     r"turn (around|toward|towards|to me|this way)|face me|face this way|"
+     r"watch me|pay attention|wake up|come here)\b",
+     "Over here? Got it. What do you need?"),
+    (r"\b((stop|quit) (talking|it)|be quiet|shut up|never ?mind|forget it)\b",
+     "Fine. I'll be here."),
     (r"\b(who are you|what are you|your name|who is lancer)\b",
      "I'm Lancer. The ACM chapter built me, and now I live on a desk answering "
      "questions about California Baptist University. Ask me about programs, "
@@ -240,6 +248,13 @@ TRANSCRIPT_ALIASES: list[tuple[str, str]] = [
     (r"\b(em ?s ?a ?i|m ?s ?a ?i|msai|ms ?ai|em ?sai)\b", "MSAI"),
     (r"\b(c ?s ?d ?s|csds|see ?s ?d ?s)\b", "CSDS"),
     (r"\b(richie|reach ?he|reach ?ee|ritchie)\b", "Reachy"),
+    # Whisper does not know the name "Lancer" and reliably lands somewhere near
+    # it. Three real transcripts from one test session: "Mancer Belt", "Answer
+    # Bot", "Lancer Belt" -- so the wake word never matched and every command
+    # was discarded as overheard chatter. "answer" on its own is left alone; it
+    # is an ordinary word and only counts when it opens the utterance as a name.
+    (r"\b(mancer|lanser|lancer belt|lance sir|lancers?bot|dancer bot)\b", "Lancer"),
+    (r"^\s*(answer bot|answer bought|lancer belt|answer belt)\b", "Lancer"),
     (r"\b(a ?c ?m|acm)\b", "ACM"),
     (r"\b(g ?e|gee ?ee) requirements?\b", "GE requirements"),
     (r"\b(engineer|engineering) school\b", "College of Engineering"),
@@ -265,6 +280,22 @@ _QUESTION_STARTS = (
 )
 MIN_ADDRESSED_WORDS = 3
 
+# Things said to a robot that are not questions and are not chatter. Without
+# these the gate rejected "Hey, look at me" and "Look over here" as
+# not-a-question and answered with silence, which is indistinguishable from not
+# hearing at all -- and they are exactly what someone says when the robot is
+# facing the wrong way, so they are the last thing that should be ignored.
+#
+# These deliberately do not require a visible face. Someone standing off-camera
+# is the whole reason the command is being given.
+_COMMAND_RE = _re.compile(
+    r"\b(look (at me|over here|here|this way|at this)|over here|"
+    r"turn (around|toward|towards|to me|this way)|face me|face this way|"
+    r"watch me|pay attention|wake up|come here|"
+    r"(stop|quit) (talking|it)|be quiet|shut up|never ?mind|forget it)\b",
+    _re.I,
+)
+
 # Openers that mark a sentence as part of an ongoing human conversation rather
 # than something said to the robot: "like the first set...", "and then it was...".
 _CHATTER_OPENERS = (
@@ -285,14 +316,27 @@ def is_addressed(text: str, face_present: bool) -> tuple[bool, str]:
     lowered = text.strip().lower()
     if any(w in lowered for w in WAKE_WORDS):
         return True, "wake-word"
+
     words = lowered.split()
+    first = words[0].strip(",.!?") if words else ""
+
+    # Chatter is filtered before commands, not after: "and then he said look at
+    # me" is someone recounting a conversation, and reading it as an order to
+    # turn makes Lancer interrupt a discussion it was not part of. People stand
+    # in front of it while talking to each other, so a visible face is not
+    # evidence either.
+    if first in _CHATTER_OPENERS and len(words) >= MIN_ADDRESSED_WORDS:
+        return False, "chatter-opener"
+
+    # Then commands, before the length and question-shape tests, because "look
+    # at me" is three words that are not a question and "turn around" is two --
+    # both were being discarded by gates meant for overheard speech, and both
+    # are exactly what someone says when the robot is facing the wrong way.
+    if _COMMAND_RE.search(lowered):
+        return True, "command"
+
     if len(words) < MIN_ADDRESSED_WORDS:
         return False, "too-short"
-    first = words[0].strip(",.!?")
-    if first in _CHATTER_OPENERS:
-        # People stand in front of Lancer while talking to each other, so a
-        # visible face is not evidence that this sentence was meant for it.
-        return False, "chatter-opener"
 
     question_shaped = lowered.endswith("?") or first in _QUESTION_STARTS
     if question_shaped:

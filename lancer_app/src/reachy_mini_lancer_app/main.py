@@ -603,6 +603,7 @@ class Lancer:
         if not bool(self.opt("doa_enabled", True)):
             return
         sustained = 0
+        complained = 0.0
         while not stop_event.is_set():
             try:
                 # Give the body back to vision once the turn has had time to land.
@@ -624,11 +625,30 @@ class Lancer:
                     # With doa_priority the speaker wins even if a face is in
                     # frame -- Lancer should face whoever is talking to it.
                     if face and not bool(self.opt("doa_priority", True)):
+                        # Sleep before looping: a bare `continue` here skipped
+                        # the interval at the bottom and spun the CPU for as
+                        # long as a face stayed in frame.
+                        time.sleep(_DOA_INTERVAL)
                         continue
 
                     # A single frame of speech is a cough or a door. Require the
                     # bearing to hold before committing the body to a turn.
                     sustained = sustained + 1 if is_speech else 0
+
+                    # These three were referenced but never assigned, so every
+                    # pass through this loop raised NameError into the bare
+                    # `except` below and was swallowed. The body-turn code has
+                    # therefore never run once: Lancer has never turned toward a
+                    # speaker, which read as a tuning problem for weeks and was
+                    # not one.
+                    deadband = float(self.opt("doa_deadband", _DOA_DEADBAND))
+                    # A turn that lands on nobody should be retried sooner than
+                    # the normal rate limit allows, or Lancer commits to a wrong
+                    # bearing and sits there for a second and a half.
+                    missed = (self._last_turn > 0.0
+                              and now - self._last_turn >= _DOA_REACQUIRE
+                              and now - self._last_face >= _DOA_REACQUIRE)
+                    gap = _DOA_RETRY_INTERVAL if missed else _DOA_MIN_INTERVAL
 
                     if (
                         sustained >= _DOA_SUSTAIN
@@ -656,8 +676,15 @@ class Lancer:
                         self._last_yaw = angle
                         self._last_turn = now
                         sustained = 0
-            except Exception:
-                pass
+            except Exception as e:
+                # Was `pass`, which is how a NameError on every single iteration
+                # stayed invisible for the life of this feature. Rate-limited so
+                # a genuinely noisy failure cannot flood the log, but never
+                # silent again.
+                if time.monotonic() - complained > 10.0:
+                    complained = time.monotonic()
+                    logger.warning("Sound tracking error: %s: %s",
+                                   type(e).__name__, e)
             time.sleep(_DOA_INTERVAL)
 
 
