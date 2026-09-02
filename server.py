@@ -30,6 +30,7 @@ from pydantic import BaseModel
 import chromadb
 import ollama
 
+import lancer_llm as llm
 import lancer_memory as memory
 import lancer_runtime as rt
 import lancer_skills as skills
@@ -1444,10 +1445,11 @@ def stream_sentences(model: str, messages: list[dict], options: dict):
     sentence boundary lands, then hand the sentence off -- that is the unit
     both the grounding check and the speech synthesiser work in.
     """
+    cfg = rt.load()
+    provider = str(cfg.get("llm_provider") or llm.OLLAMA)
     buffer = ""
-    for chunk in ollama.chat(model=model, messages=messages,
-                             options=options, stream=True):
-        buffer += chunk.get("message", {}).get("content", "")
+    for chunk in llm.stream_text(messages, model, provider, options):
+        buffer += chunk
         while True:
             cut = _first_boundary(buffer)
             if cut is None:

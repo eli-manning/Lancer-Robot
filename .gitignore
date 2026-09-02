@@ -237,3 +237,7 @@ lancer_memory.db-wal
 # Reflection proposals and the gateway workspace are runtime state
 stack/proposals/
 stack/workspace/
+
+# API keys for hosted model providers -- never committed
+lancer_secrets.json
+.env

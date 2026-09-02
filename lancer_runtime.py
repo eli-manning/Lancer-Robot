@@ -23,6 +23,10 @@ _lock = threading.Lock()
 
 DEFAULTS: dict[str, Any] = {
     # generation
+    # Who answers: "ollama" (local, private, free), "anthropic" or "gemini"
+    # (hosted, faster and smarter, sends the conversation off this machine).
+    # API keys live in lancer_secrets.json, never here -- this file is tracked.
+    "llm_provider": "ollama",
     "llm_model": "qwen2.5:3b",
     "temperature": 0.3,
     "max_sentences": 3,
