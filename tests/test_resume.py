@@ -170,7 +170,7 @@ def run_converse(lancer, frames, follow_up, server_reply):
     lancer.listen = lambda e, max_wait=None: follow_up
     lancer.face_recently_seen = lambda: False
     original = main.stream_server
-    main.stream_server = lambda a, f=False: server_reply
+    main.stream_server = lambda a, f=False, interrupted=False: server_reply
     try:
         main.LancerApp.converse(main.LancerApp(), lancer, frames, False, Stop())
     finally:

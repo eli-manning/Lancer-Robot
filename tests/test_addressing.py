@@ -131,6 +131,53 @@ def test_overheard_speech_is_still_ignored(chatter):
     assert not ok, f"{chatter!r} should not be treated as addressed"
 
 
+# --- following an interruption -------------------------------------------
+
+@pytest.mark.parametrize("said", [
+    "The Dean of the College of Engineering.",   # real transcript
+    "no wait tell me about transfers",
+    "actually what about MSAI",
+    "the machine learning one",
+])
+def test_a_follow_up_after_interrupting_gets_through(said):
+    """
+    Talking over an answer is itself addressing the robot.
+
+    "The Dean of the College of Engineering." was rejected as not-a-question,
+    so the robot decided the interruption had not been real and calmly resumed
+    the answer nobody wanted any more.
+    """
+    ok, why = server.is_addressed(server.normalize_transcript(said), True,
+                                  interrupted=True)
+    assert ok, f"{said!r} was discarded as {why}"
+
+
+@pytest.mark.parametrize("chatter", [
+    "Oh, that's so good.",                       # real transcript
+    "I mean, this will work for Friday, but you know",   # real transcript
+    "yeah dude totally",
+    "um so like the thing on friday",
+])
+def test_talking_over_lancer_to_someone_else_still_resumes(chatter):
+    """
+    The point of resuming is to survive being talked over by accident.
+
+    If every noise after an interrupt counted as a question, the feature would
+    answer half the conversations in the room instead of finishing its sentence.
+    """
+    ok, _ = server.is_addressed(server.normalize_transcript(chatter), True,
+                                interrupted=True)
+    assert not ok, f"{chatter!r} should read as overheard"
+
+
+def test_the_relaxation_applies_only_to_interruptions():
+    """A bare noun phrase out of nowhere is still not a question."""
+    said = "The Dean of the College of Engineering."
+    assert not server.is_addressed(server.normalize_transcript(said), True)[0]
+    assert server.is_addressed(server.normalize_transcript(said), True,
+                               interrupted=True)[0]
+
+
 def test_questions_still_get_through():
     assert addressed("What classes do I take in BASAI?")[0]
 

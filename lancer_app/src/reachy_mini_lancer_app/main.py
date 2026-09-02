@@ -1153,7 +1153,8 @@ def ask_server(audio: np.ndarray, face_present: bool = False) -> dict | None:
     return payload
 
 
-def stream_server(audio: np.ndarray, face_present: bool = False):
+def stream_server(audio: np.ndarray, face_present: bool = False,
+                  interrupted: bool = False):
     """
     POST one utterance and return an iterator over the reply's frames.
 
@@ -1168,7 +1169,8 @@ def stream_server(audio: np.ndarray, face_present: bool = False):
     try:
         response = requests.post(
             f"{SERVER_URL}/voice/stream",
-            params={"face": str(bool(face_present)).lower()},
+            params={"face": str(bool(face_present)).lower(),
+                    "interrupted": str(bool(interrupted)).lower()},
             files={"file": ("utterance.wav", to_wav_bytes(audio), "audio/wav")},
             stream=True,
             timeout=REQUEST_TIMEOUT,
@@ -1261,7 +1263,11 @@ class LancerApp(ReachyMiniApp):  # type: ignore[misc]
                 follow_up = lancer.listen(stop_event, max_wait=_RESUME_LISTEN_WAIT)
 
                 if follow_up is not None:
-                    reply = stream_server(follow_up, lancer.face_recently_seen())
+                    # Flagged as an interruption: whoever talked over the
+                    # answer was talking to Lancer, so the server does not make
+                    # them phrase it as a question to be heard.
+                    reply = stream_server(follow_up, lancer.face_recently_seen(),
+                                          interrupted=True)
                     if reply is not None:
                         # A real question. The unfinished answer is dropped on
                         # purpose -- nobody wants the end of the previous

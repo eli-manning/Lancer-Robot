@@ -400,6 +400,10 @@ _COMMAND_RE = _re.compile(
 _DIRECTIVE_RE = _re.compile(
     r"\b(tell me|show me|give me|explain|help me|teach me|remind me|"
     r"i want to know|i need to know|i'?d like to know|can you|could you|"
+    # "actually, what about MSAI" is a follow-up, not chatter, and it opens with
+    # a word the chatter filter distrusts -- so the request has to be
+    # recognisable on its own for the sentence to survive that filter.
+    r"what about|how about|what if|"
     r"what'?s? (up|good))\b",
     _re.I,
 )
@@ -413,7 +417,8 @@ _CHATTER_OPENERS = (
 )
 
 
-def is_addressed(text: str, face_present: bool) -> tuple[bool, str]:
+def is_addressed(text: str, face_present: bool,
+                 interrupted: bool = False) -> tuple[bool, str]:
     """
     Decide whether an utterance was meant for Lancer.
 
@@ -428,13 +433,31 @@ def is_addressed(text: str, face_present: bool) -> tuple[bool, str]:
     words = lowered.split()
     first = words[0].strip(",.!?") if words else ""
 
+    question_shaped = lowered.endswith("?") or first in _QUESTION_STARTS
+    directive = bool(_DIRECTIVE_RE.search(lowered))
+    # Multi-word openers matter: "i mean, this will work for Friday" opens with
+    # "i", which is not an opener on its own, so matching only the first word
+    # let a whole class of overheard sentences through.
+    # Punctuation stripped first: "i mean, this will work" does not start with
+    # "i mean " because of the comma, so the multi-word openers never matched
+    # the way people actually get transcribed.
+    spaced = _re.sub(r"[,.!?;:]+", " ", lowered)
+    opener = (first in _CHATTER_OPENERS
+              or any(spaced.startswith(f"{o} ") for o in _CHATTER_OPENERS))
+
     # Chatter is filtered before commands, not after: "and then he said look at
     # me" is someone recounting a conversation, and reading it as an order to
     # turn makes Lancer interrupt a discussion it was not part of. People stand
     # in front of it while talking to each other, so a visible face is not
     # evidence either.
-    if first in _CHATTER_OPENERS and len(words) >= MIN_ADDRESSED_WORDS:
-        return False, "chatter-opener"
+    #
+    # The one exception is a follow-up to an interruption, where "no wait, tell
+    # me about transfers" is exactly how people speak -- an opener followed by a
+    # real request. There the request has to be explicit: a question or a
+    # directive, not a command, since recounted speech is full of commands.
+    if opener and len(words) >= MIN_ADDRESSED_WORDS:
+        if not (interrupted and (question_shaped or directive)):
+            return False, "chatter-opener"
 
     # Then commands, before the length and question-shape tests, because "look
     # at me" is three words that are not a question and "turn around" is two --
@@ -446,12 +469,19 @@ def is_addressed(text: str, face_present: bool) -> tuple[bool, str]:
     if len(words) < MIN_ADDRESSED_WORDS:
         return False, "too-short"
 
-    question_shaped = lowered.endswith("?") or first in _QUESTION_STARTS
+    # Someone who talked over an answer is talking to the robot -- that is what
+    # interrupting is. So a follow-up only has to not be chatter, rather than
+    # prove itself a question. "The Dean of the College of Engineering." was
+    # rejected as not-a-question, which made the robot treat a real interruption
+    # as a false alarm and calmly resume the answer nobody wanted any more.
+    if interrupted:
+        return True, "follow-up"
+
     if question_shaped:
         return True, "question"
 
     # Direct address without a question: "tell me about X", "I want to know Y".
-    if _DIRECTIVE_RE.search(lowered):
+    if directive:
         return True, "directive"
 
     return False, "not-a-question"
@@ -2051,7 +2081,8 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True,
 
 
 @app.post("/voice/stream")
-async def voice_stream(file: UploadFile = File(...), face: bool = False):
+async def voice_stream(file: UploadFile = File(...), face: bool = False,
+                       interrupted: bool = False):
     """
     Streaming version of /voice: same turn, delivered sentence by sentence.
 
@@ -2101,9 +2132,10 @@ async def voice_stream(file: UploadFile = File(...), face: bool = False):
         wake_robot()
         clock = stage(trace, "woken", clock, heard=heard)
 
-    addressed, reason = is_addressed(heard, face)
+    addressed, reason = is_addressed(heard, face, interrupted=interrupted)
     trace["addressed"] = addressed
     trace["addressed_reason"] = reason
+    trace["interrupted"] = interrupted
     clock = stage(trace, "addressing gate", clock,
                   addressed=addressed, reason=reason, face_present=face)
     # A follow-up like "go on" is three words with no question mark, which the
