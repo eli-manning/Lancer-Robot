@@ -1666,7 +1666,18 @@ def looks_like_wake(text: str) -> bool:
 # Until when a reply needs no wake word, and when he last finished speaking.
 # "armed" means there has been a real conversation to go quiet after: a server
 # that has just started has nothing to fall asleep from.
-_attention = {"until": 0.0, "spoke_at": 0.0, "armed": False}
+_attention = {"until": 0.0, "spoke_at": 0.0, "armed": False,
+              "heard_at": 0.0, "busy_since": 0.0}
+
+
+# A turn that dies without reaching its done frame must not block sleep for
+# ever, so being busy expires on its own.
+_BUSY_MAX = 90.0
+
+
+def _busy() -> bool:
+    since = _attention["busy_since"]
+    return bool(since) and (time.monotonic() - since) < _BUSY_MAX
 
 
 def attentive() -> bool:
@@ -1811,7 +1822,15 @@ async def _idle_sleep_watch() -> None:
                     or cfg.get("addressing_mode") != "wake_word"
                     or not _attention["armed"] or is_asleep()):
                 continue
-            quiet_for = time.monotonic() - _attention["spoke_at"]
+            # Quiet means nothing has happened, not "he has not spoken".
+            # Counting only from his last word meant the clock ran while
+            # somebody was still asking -- their sentence, the transcription
+            # and the answer all land after it starts -- so he folded up
+            # mid-conversation. A turn being processed right now counts too.
+            if _busy():
+                continue
+            quiet_for = time.monotonic() - max(_attention["spoke_at"],
+                                               _attention["heard_at"])
             if quiet_for < float(cfg.get("auto_sleep_after") or 10.0):
                 continue
             # Disarm first: the skill takes a couple of seconds, and a second
@@ -2306,6 +2325,7 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True,
                     # speaker is still playing while the body folds down, the
                     # microphone hears it, and the last thing he does before
                     # going quiet is talk over himself.
+                    _attention["busy_since"] = 0.0
                     trace["route"] = "sleep"
                     trace["answer"] = ""
                     stage(trace, "total", started)
@@ -2426,6 +2446,7 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True,
     # he actually spoke out loud. A turn typed into the dashboard must not make
     # the robot start accepting unnamed speech in the room; the window exists
     # because he just talked *to you*, not because the server did work.
+    _attention["busy_since"] = 0.0
     now = time.monotonic()
     if speak and answer:
         playback_end = max(now, (speech["started"] or now) + speech["seconds"])
@@ -2552,6 +2573,11 @@ async def voice_stream(file: UploadFile = File(...), face: bool = False,
     trace["addressed"] = addressed
     trace["addressed_reason"] = reason
     trace["interrupted"] = interrupted
+    if addressed:
+        # Someone is talking to him right now: that is the opposite of quiet,
+        # whatever his own last word was.
+        _attention["heard_at"] = time.monotonic()
+        _attention["busy_since"] = time.monotonic()
     clock = stage(trace, "addressing gate", clock,
                   addressed=addressed, reason=reason, face_present=face)
     # A follow-up like "go on" is three words with no question mark, which the
