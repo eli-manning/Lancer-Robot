@@ -21,6 +21,7 @@
   .pill b{color:var(--ink);font-weight:600}
   .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;background:var(--bad)}
   .dot.on{background:var(--ok)}
+  .qrow{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
   .tabs{display:flex;gap:2px;padding:0 12px;background:var(--panel);
         border-bottom:1px solid var(--line);overflow-x:auto;position:sticky;top:0;z-index:5}
   .tab{background:none;border:0;border-bottom:2px solid transparent;border-radius:0;
@@ -157,6 +158,49 @@
     </section>
 </div>
 <div class="panel" id="panel-robot">
+    <section>
+      <h2>Quick actions</h2>
+      <div class="body">
+        <div class="ask" style="padding:0;border:0;margin-bottom:12px">
+          <input id="sayText" placeholder="Type something for Lancer to say out loud…"
+                 onkeydown="if(event.key==='Enter')sayIt()">
+          <button class="pri" onclick="sayIt()">Say it</button>
+        </div>
+
+        <div class="fld" style="margin-bottom:12px">
+          <label>State</label>
+          <div class="qrow">
+            <button onclick="quickSkill('rest',{action:'wake'},'waking')">Wake up</button>
+            <button onclick="quickSkill('rest',{action:'sleep'},'sleeping')">Go to sleep</button>
+            <button onclick="quickSkill('look',{question:'what do you see'},'looking')">What do you see</button>
+          </div>
+        </div>
+
+        <div class="fld" style="margin-bottom:12px">
+          <label>Gestures</label>
+          <div class="qrow" id="emotions"></div>
+        </div>
+
+        <div class="fld" style="margin-bottom:12px">
+          <label>Sounds</label>
+          <div class="qrow" id="cues"></div>
+        </div>
+
+        <div class="fld">
+          <label>Timer</label>
+          <div class="qrow">
+            <input id="timerFor" placeholder="5 minutes" style="max-width:150px"
+                   onkeydown="if(event.key==='Enter')quickTimer()">
+            <button onclick="quickTimer()">Set</button>
+            <button onclick="quickSkill('timer',{action:'list'},'checking')">What's running</button>
+            <button class="danger" onclick="quickSkill('timer',{action:'cancel'},'cancelling')">Cancel all</button>
+          </div>
+        </div>
+
+        <div class="note" id="quickOut" style="margin-top:12px"></div>
+      </div>
+    </section>
+
 <section>
       <h2>Robot
         <span class="sp">
@@ -591,6 +635,57 @@ async function loadTraces(){
 }
 
 setInterval(()=>{ if(document.getElementById('autotrace')?.checked) loadTraces(); }, 4000);
+// --- Quick actions --------------------------------------------------------
+// Everything here goes through the same skills the model calls, so pressing a
+// button and asking out loud do the same thing -- and the Wake button is the
+// escape hatch for when a mistranscription leaves him asleep.
+const EMOTIONS = ["yes","no","curious","confused","happy","laughing",
+                  "surprised","proud","welcoming","thanks","celebrate","dance"];
+const CUES = ["heard","thinking","skill","error","chime"];
+
+function quickOut(text){ document.getElementById('quickOut').textContent = text; }
+
+async function quickSkill(name, args, verb){
+  quickOut((verb||'running')+'…');
+  const r = await F('/skills/'+name, {method:'POST',
+    headers:{'Content-Type':'application/json'}, body:JSON.stringify(args||{})});
+  if(r.__error){ quickOut('failed: '+r.__error); return; }
+  quickOut(r.seen || r.detail || r.error || JSON.stringify(r));
+  status();
+}
+
+async function sayIt(){
+  const el = document.getElementById('sayText');
+  const text = el.value.trim(); if(!text) return;
+  const r = await F('/api/say', {method:'POST',
+    headers:{'Content-Type':'application/json'}, body:JSON.stringify({text})});
+  if(r.__error){ quickOut('failed: '+r.__error); return; }
+  el.value = ''; quickOut('saying: ' + text);
+}
+
+async function playCue(kind){
+  const r = await F('/api/cue', {method:'POST',
+    headers:{'Content-Type':'application/json'}, body:JSON.stringify({kind})});
+  quickOut(r.__error ? ('failed: '+r.__error) : ('played '+kind));
+}
+
+async function quickTimer(){
+  const el = document.getElementById('timerFor');
+  const duration = el.value.trim() || '5 minutes';
+  await quickSkill('timer', {action:'set', duration}, 'setting a timer');
+  el.value = '';
+}
+
+function fillQuickActions(){
+  const em = document.getElementById('emotions');
+  if(em) em.innerHTML = EMOTIONS.map(e=>
+    `<button onclick="quickSkill('play_emotion',{emotion:'${e}'},'${e}')">${e}</button>`).join('');
+  const cu = document.getElementById('cues');
+  if(cu) cu.innerHTML = CUES.map(c=>
+    `<button onclick="playCue('${c}')">${c}</button>`).join('');
+}
+fillQuickActions();
+
 // --- Services -------------------------------------------------------------
 // Status comes from the ports rather than from pidfiles, so a process started
 // in a terminal shows up here and can be stopped here.

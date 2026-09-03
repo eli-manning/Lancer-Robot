@@ -105,6 +105,9 @@ _FACE_STICKY = 6.0           # seconds a face still counts as present after loss
 # turned away, or off to the side -- all cases where the on-board face detector
 # gives up. YuNet stays as the fallback when the Mac is unreachable.
 _TRACK_INTERVAL = 0.12       # seconds between frames sent for detection
+# How often the Mac is sent a frame regardless of tracking: fresh enough for
+# "what do you see", slow enough to be free.
+_HEARTBEAT_INTERVAL = 1.0
 _TRACK_FALLBACK_AFTER = 2.0  # seconds without a YOLO hit before handing back
 _FACE_PRIMARY_GRACE = 0.8    # seconds a face must be gone before YOLO takes over
 _YOLO_IDLE_INTERVAL = 0.4    # slower polling while YuNet is doing the work
@@ -550,7 +553,29 @@ class Lancer:
         sent_u = sent_v = None        # last position actually commanded
         last_move = 0.0
         last_aim_complaint = 0.0
+        last_heartbeat = 0.0
         while not stop_event.is_set():
+            # Send the Mac a frame on a steady beat, whatever the tracking
+            # branch below decides. Tracking only ships frames when the
+            # on-device face tracker has lost the person, so without this the
+            # Mac had no picture at exactly the moment someone was standing in
+            # front of the robot -- and announcements, which ride back on these
+            # requests, could not be delivered either.
+            if time.monotonic() - last_heartbeat > _HEARTBEAT_INTERVAL:
+                last_heartbeat = time.monotonic()
+                try:
+                    beat = self.mini.media.get_frame_jpeg()
+                    if beat:
+                        answer = session.post(
+                            f"{SERVER_URL}/api/eyes",
+                            files={"file": ("f.jpg", beat, "image/jpeg")},
+                            timeout=4,
+                        ).json()
+                        if answer.get("say"):
+                            self.speak_announcement(answer["say"])
+                except Exception:
+                    pass
+
             # YuNet runs on the robot with no network hop, so it is much lower
             # latency than shipping a frame to the Mac and back. Let it lead and
             # only reach for YOLO when it has actually lost the person.
@@ -576,8 +601,13 @@ class Lancer:
                        else _YOLO_IDLE_INTERVAL)
             if self.stopping:
                 return
-            if self.hands_off():
-                continue
+            # Seeing is not moving. hands_off() means do not drive the head --
+            # asleep, motors down, a move already playing -- and it used to skip
+            # the frame grab with it, so a folded robot was also a blind one:
+            # "what do you see" answered "my eyes are closed" whenever the
+            # motors happened to be off, and a timer could not announce itself
+            # because announcements ride back on this very request.
+            frozen = self.hands_off()
             # Tracking deliberately continues while Lancer is talking. Freezing
             # it made the robot go rigid for the whole of every answer, staring
             # wherever it happened to be pointing when it started -- which is
@@ -599,6 +629,11 @@ class Lancer:
             # which he speaks without having been spoken to.
             if reply and reply.get("say"):
                 self.speak_announcement(reply["say"])
+
+            # Everything past here moves the head, which is the part that has
+            # to stand down.
+            if frozen:
+                continue
 
             now = time.monotonic()
             if reply and reply.get("found"):

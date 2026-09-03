@@ -58,7 +58,7 @@ def _score(box, width: int, height: int) -> float:
 _last_frame: dict = {"jpeg": None, "at": 0.0}
 
 
-def last_frame(max_age: float = 5.0) -> bytes | None:
+def last_frame(max_age: float = 15.0) -> bytes | None:
     """The current view, or None if the app is not sending frames."""
     if not _last_frame["jpeg"] or time.time() - _last_frame["at"] > max_age:
         return None
@@ -69,6 +69,26 @@ def _announcement() -> dict | None:
     import server
 
     return server.take_announcement()
+
+
+@router.post("/api/eyes")
+async def eyes(file: UploadFile = File(...)) -> dict:
+    """
+    A frame, kept but not analysed, plus anything Lancer needs to say.
+
+    Separate from /api/track because tracking is conditional and this must not
+    be. The app only ships a frame to YOLO when its own on-device face tracker
+    has lost the person -- so with someone standing in front of the robot the
+    Mac had no recent frame at all, "what do you see" answered that his eyes
+    were closed, and a timer riding on that same request could never announce
+    itself. This runs no inference; it is a heartbeat with a picture attached.
+    """
+    raw = await file.read()
+    if raw:
+        _last_frame["jpeg"] = raw
+        _last_frame["at"] = time.time()
+    say = _announcement()
+    return {"ok": True, **({"say": say} if say else {})}
 
 
 @router.get("/api/frame")

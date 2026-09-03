@@ -1625,9 +1625,42 @@ _sleep_state = {"asleep": False}
 # What it takes to wake it. Its own name counts, so "Lancer?" works the way
 # saying someone's name works, and so does simply telling it to wake up.
 _WAKE_RE = _re.compile(
-    r"\b(lancer|reachy|wake up|wake|get up|rise and shine|good morning)\b",
+    r"\b(lancer|reachy|wake up|wake|get up|rise and shine|good morning|"
+    r"lance|lancer's|reachie|richie|ritchie|reach he|reach ee|leachy|"
+    r"preachy|beachy|lanser|lanced)\b",
     _re.I,
 )
+
+# Words a wake attempt is allowed to be a near-miss of. Sleep is the one state
+# where a mistranscription strands him: everything else he ignores costs you a
+# repeat, but the wrong guess here means the only way back up is the dashboard.
+_WAKE_TARGETS = ("lancer", "reachy", "wake")
+
+
+def looks_like_wake(text: str) -> bool:
+    """
+    Whether this was probably someone trying to wake him.
+
+    Deliberately looser than the addressing gate. Whisper renders a name
+    shouted at a folded-up robot as all sorts of things -- "Richie", "lance",
+    "reach he" -- and being stubborn about spelling is how a robot ends up
+    needing a laptop to get out of a nap.
+    """
+    import difflib
+
+    if _WAKE_RE.search(text or ""):
+        return True
+    # Only short utterances: a near-miss buried in a long sentence about
+    # something else is a coincidence, not a summons.
+    words = _re.findall(r"[a-z']+", (text or "").lower())
+    if not words or len(words) > 6:
+        return False
+    for word in words[:4]:
+        if len(word) < 4:
+            continue
+        if difflib.get_close_matches(word, _WAKE_TARGETS, n=1, cutoff=0.8):
+            return True
+    return False
 
 
 # Until when a reply needs no wake word, and when he last finished speaking.
@@ -1652,10 +1685,12 @@ def is_asleep() -> bool:
 _announcements: list[dict] = []
 
 
-def announce(text: str, kind: str = "timer") -> None:
-    if text:
-        _announcements.append({"text": text, "kind": kind, "at": time.time()})
-        logger.info("Queued announcement (%s): %r", kind, text)
+def announce(text: str, kind: str = "timer", audio: bytes | None = None) -> None:
+    """Queue something to say. Pre-rendered audio skips synthesis."""
+    if text or audio:
+        _announcements.append({"text": text, "kind": kind, "at": time.time(),
+                               "audio": audio})
+        logger.info("Queued announcement (%s): %r", kind, text[:60])
 
 
 def take_announcement() -> dict | None:
@@ -1668,13 +1703,77 @@ def take_announcement() -> dict | None:
             logger.info("Dropping stale announcement: %r", item["text"])
             continue
         try:
-            audio = synthesize(item["text"])
+            audio = item.get("audio") or synthesize(item["text"])
         except Exception as e:
             logger.warning("Could not synthesise announcement: %s", e)
             return {"text": item["text"], "kind": item["kind"]}
         return {"text": item["text"], "kind": item["kind"],
                 "audio_b64": base64.b64encode(audio).decode()}
     return None
+
+
+def cue_wav(kind: str, volume: float = 0.18) -> bytes:
+    """
+    A short non-speech cue as 16 kHz mono WAV.
+
+    Generated here rather than reusing the app's sounds module because that one
+    lives on the robot and pushes straight to the speaker; this has to travel
+    over the announcement channel like anything else Lancer says.
+    """
+    import io
+    import wave
+
+    import numpy as np
+
+    def tone(freq: float, seconds: float, level: float) -> np.ndarray:
+        n = int(16000 * seconds)
+        t = np.arange(n, dtype=np.float32) / 16000
+        wave_ = np.sin(2 * np.pi * freq * t).astype(np.float32) * level
+        edge = max(1, int(16000 * 0.02))
+        if n > 2 * edge:                       # fade, or it clicks
+            ramp = np.linspace(0.0, 1.0, edge, dtype=np.float32)
+            wave_[:edge] *= ramp
+            wave_[-edge:] *= ramp[::-1]
+        return wave_
+
+    shapes = {
+        "thinking": [(392.0, 0.11), (523.25, 0.11)],
+        "skill": [(523.25, 0.07), (783.99, 0.09)],
+        "error": [(440.0, 0.09), (311.13, 0.13)],
+        "heard": [(659.25, 0.06)],
+        "chime": [(659.25, 0.09), (880.0, 0.09), (1046.5, 0.16)],
+    }
+    parts = [tone(f, d, volume) for f, d in shapes.get(kind, shapes["heard"])]
+    samples = np.concatenate(parts) if parts else np.zeros(1, dtype=np.float32)
+    pcm = (np.clip(samples, -1, 1) * 32767).astype(np.int16)
+
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(16000)
+        handle.writeframes(pcm.tobytes())
+    return buffer.getvalue()
+
+
+@app.post("/api/say")
+async def say_something(payload: dict) -> dict:
+    """Make Lancer say a line, on demand, from the dashboard."""
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="nothing to say")
+    if is_asleep():
+        wake_robot()
+    announce(text, kind="say")
+    return {"ok": True, "text": text, "queued": len(_announcements)}
+
+
+@app.post("/api/cue")
+async def play_cue(payload: dict) -> dict:
+    """Play one of the non-speech cues through the robot's speaker."""
+    kind = str(payload.get("kind") or "heard").strip().lower()
+    announce("", kind="cue", audio=cue_wav(kind))
+    return {"ok": True, "cue": kind}
 
 
 async def _timer_watch() -> None:
@@ -2437,7 +2536,7 @@ async def voice_stream(file: UploadFile = File(...), face: bool = False,
     # until Lancer is woken by name -- otherwise "go to sleep" leaves a folded,
     # motorless robot still replying to every conversation in the room.
     if is_asleep():
-        if not _WAKE_RE.search(heard):
+        if not looks_like_wake(heard):
             logger.info("[stream] asleep, ignoring: %r", heard)
             stage(trace, "asleep", clock, heard=heard)
             _traces.appendleft(trace)

@@ -57,7 +57,7 @@ SERVER_URL = f"http://127.0.0.1:{SERVER_PORT}"
 # the server is stopped.
 PROXIED = {
     "GET": ["/api/traces", "/api/voices", "/api/stats", "/state"],
-    "POST": ["/api/retrieve", "/api/ask"],
+    "POST": ["/api/retrieve", "/api/ask", "/api/say", "/api/cue"],
 }
 
 
@@ -373,6 +373,21 @@ async def control_service(name: str, action: str) -> dict:
         await asyncio.sleep(0.5)
         return await asyncio.to_thread(_start, service)
     raise HTTPException(status_code=400, detail="action must be start/stop/restart")
+
+
+@control.post("/skills/{name}")
+async def run_skill(name: str, request: Request) -> JSONResponse:
+    """
+    Run one skill from the dashboard.
+
+    Forwarded rather than run here: skills that move the robot expect the
+    server's view of sleep state, and running two copies of that state in two
+    processes is how they end up disagreeing.
+    """
+    import asyncio
+
+    body = await request.body()
+    return await asyncio.to_thread(_forward, "POST", f"/skills/{name}", body, "")
 
 
 @control.get("/api/services/{name}/log")
