@@ -1779,12 +1779,44 @@ def is_asleep() -> bool:
 _announcements: list[dict] = []
 
 
-def announce(text: str, kind: str = "timer", audio: bytes | None = None) -> None:
-    """Queue something to say. Pre-rendered audio skips synthesis."""
+def announce(text: str, kind: str = "timer", audio: bytes | None = None,
+             prefix: bytes | None = None) -> None:
+    """
+    Queue something to say. Pre-rendered audio skips synthesis.
+
+    `prefix` is played first and joined into the same clip -- a timer should
+    sound like a timer before it explains itself, and sending it as one blob
+    means the robot cannot start talking over its own alarm.
+    """
     if text or audio:
         _announcements.append({"text": text, "kind": kind, "at": time.time(),
-                               "audio": audio})
+                               "audio": audio, "prefix": prefix})
         logger.info("Queued announcement (%s): %r", kind, text[:60])
+
+
+def _join_wavs(*blobs: bytes) -> bytes:
+    """Concatenate 16 kHz mono WAVs into one."""
+    import io
+    import wave
+
+    frames = []
+    for blob in blobs:
+        if not blob:
+            continue
+        try:
+            with wave.open(io.BytesIO(blob)) as handle:
+                frames.append(handle.readframes(handle.getnframes()))
+        except (wave.Error, EOFError):
+            continue
+    if not frames:
+        return b""
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(16000)
+        out.writeframes(b"".join(frames))
+    return buffer.getvalue()
 
 
 def take_announcement() -> dict | None:
@@ -1798,6 +1830,8 @@ def take_announcement() -> dict | None:
             continue
         try:
             audio = item.get("audio") or synthesize(item["text"])
+            if item.get("prefix"):
+                audio = _join_wavs(item["prefix"], audio) or audio
         except Exception as e:
             logger.warning("Could not synthesise announcement: %s", e)
             return {"text": item["text"], "kind": item["kind"]}
@@ -1806,7 +1840,10 @@ def take_announcement() -> dict | None:
     return None
 
 
-def cue_wav(kind: str, volume: float = 0.18) -> bytes:
+ALARM_VOLUME = 0.30
+
+
+def cue_wav(kind: str, volume: float | None = None) -> bytes:
     """
     A short non-speech cue as 16 kHz mono WAV.
 
@@ -1819,6 +1856,9 @@ def cue_wav(kind: str, volume: float = 0.18) -> bytes:
 
     import numpy as np
 
+    if volume is None:
+        volume = ALARM_VOLUME if kind == "alarm" else 0.18
+
     def tone(freq: float, seconds: float, level: float) -> np.ndarray:
         n = int(16000 * seconds)
         t = np.arange(n, dtype=np.float32) / 16000
@@ -1830,14 +1870,26 @@ def cue_wav(kind: str, volume: float = 0.18) -> bytes:
             wave_[-edge:] *= ramp[::-1]
         return wave_
 
+    def silence(seconds: float) -> np.ndarray:
+        return np.zeros(int(16000 * seconds), dtype=np.float32)
+
+    # A frequency of 0 is a gap. An alarm is mostly gaps -- the pattern is what
+    # makes it read as "your time is up" rather than as a notification chirp.
     shapes = {
         "thinking": [(392.0, 0.11), (523.25, 0.11)],
         "skill": [(523.25, 0.07), (783.99, 0.09)],
         "error": [(440.0, 0.09), (311.13, 0.13)],
         "heard": [(659.25, 0.06)],
         "chime": [(659.25, 0.09), (880.0, 0.09), (1046.5, 0.16)],
+        # Two urgent triplets, the way a kitchen timer does it. Loud enough to
+        # carry across a room, short enough not to become the thing you resent.
+        "alarm": [(880.0, 0.13), (0, 0.07), (880.0, 0.13), (0, 0.07),
+                  (880.0, 0.13), (0, 0.30),
+                  (880.0, 0.13), (0, 0.07), (880.0, 0.13), (0, 0.07),
+                  (988.0, 0.26)],
     }
-    parts = [tone(f, d, volume) for f, d in shapes.get(kind, shapes["heard"])]
+    parts = [silence(d) if not f else tone(f, d, volume)
+             for f, d in shapes.get(kind, shapes["heard"])]
     samples = np.concatenate(parts) if parts else np.zeros(1, dtype=np.float32)
     pcm = (np.clip(samples, -1, 1) * 32767).astype(np.int16)
 
@@ -1879,7 +1931,8 @@ async def _timer_watch() -> None:
                 label = (timer.get("label") or "").strip()
                 spoken = timers.describe(timer.get("seconds", 0))
                 announce(f"That's your {label} timer, {spoken} is up."
-                         if label else f"Your {spoken} timer is up.")
+                         if label else f"Your {spoken} timer is up.",
+                         prefix=cue_wav("alarm"))
                 # A timer going off is a reason to be awake: being folded up
                 # and announcing it to the ceiling helps nobody.
                 if is_asleep():
