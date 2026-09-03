@@ -21,8 +21,28 @@
   .pill b{color:var(--ink);font-weight:600}
   .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;background:var(--bad)}
   .dot.on{background:var(--ok)}
-  main{display:grid;grid-template-columns:1.15fr .85fr;gap:16px;padding:16px;align-items:start}
-  @media(max-width:1000px){main{grid-template-columns:1fr}}
+  .tabs{display:flex;gap:2px;padding:0 12px;background:var(--panel);
+        border-bottom:1px solid var(--line);overflow-x:auto;position:sticky;top:0;z-index:5}
+  .tab{background:none;border:0;border-bottom:2px solid transparent;border-radius:0;
+       padding:10px 15px;font-size:13px;color:var(--dim);white-space:nowrap}
+  .tab:hover{color:var(--ink);border-color:var(--line)}
+  .tab.on{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
+  main{padding:16px;max-width:1100px;margin:0 auto}
+  .panel{display:none;flex-direction:column;gap:16px}
+  .panel.on{display:flex}
+  /* Setting groups collapse, so the long robot-tuning list is not in the way
+     of the four things anyone changes day to day. */
+  details.grp{grid-column:1/-1;margin-top:10px;
+    /* .grp still styles the summary; without this reset its uppercase and
+       11px cascade down onto every label and help line inside. */
+    text-transform:none;font-size:14px;letter-spacing:normal;color:var(--ink)}
+  details.grp>summary{cursor:pointer;list-style:none;font-size:11px;
+    text-transform:uppercase;letter-spacing:.08em;color:var(--accent);
+    padding:6px 0;display:flex;align-items:center;gap:7px}
+  details.grp>summary::-webkit-details-marker{display:none}
+  details.grp>summary::before{content:"▸";font-size:10px;transition:.15s}
+  details.grp[open]>summary::before{transform:rotate(90deg)}
+  details.grp>.grid{padding-top:6px}
   section{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
   section>h2{font-size:12px;text-transform:uppercase;letter-spacing:.09em;color:var(--dim);
              margin:0;padding:11px 14px;border-bottom:1px solid var(--line);
@@ -82,9 +102,18 @@
   is back. <button onclick="status();loadServices()" style="margin-left:8px">Retry</button>
 </div>
 
+<nav class="tabs" id="tabs">
+  <button class="tab" data-tab="talk" onclick="showTab('talk')">Talk</button>
+  <button class="tab" data-tab="services" onclick="showTab('services')">Services</button>
+  <button class="tab" data-tab="robot" onclick="showTab('robot')">Robot</button>
+  <button class="tab" data-tab="model" onclick="showTab('model')">Model</button>
+  <button class="tab" data-tab="debug" onclick="showTab('debug')">Debug</button>
+  <button class="tab" data-tab="settings" onclick="showTab('settings')">Settings</button>
+</nav>
+
 <main>
-  <div style="display:flex;flex-direction:column;gap:16px">
-    <section>
+<div class="panel" id="panel-talk">
+<section>
       <h2>Conversation
         <span class="sp">
           <button onclick="refreshLog()">Refresh</button>
@@ -98,8 +127,7 @@
         <button class="pri" onclick="ask()">Send</button>
       </div>
     </section>
-
-    <section>
+<section>
       <h2>Retrieval inspector</h2>
       <div class="body">
         <div class="ask" style="padding:0;border:0">
@@ -110,10 +138,9 @@
         <div id="rout"></div>
       </div>
     </section>
-  </div>
-
-  <div style="display:flex;flex-direction:column;gap:16px">
-    <section>
+</div>
+<div class="panel" id="panel-services">
+<section>
       <h2>Services
         <span class="sp">
           <button class="pri" onclick="allServices('start')">Start all</button>
@@ -128,8 +155,9 @@
           is Ollama, then Chroma, then the server.</div>
       </div>
     </section>
-
-    <section>
+</div>
+<div class="panel" id="panel-robot">
+<section>
       <h2>Robot
         <span class="sp">
           <button onclick="robot('start')">Start app</button>
@@ -164,8 +192,9 @@
         <div class="note" id="rstat">…</div>
       </div>
     </section>
-
-    <section>
+</div>
+<div class="panel" id="panel-model">
+<section>
       <h2>Model provider
         <span class="sp"><button onclick="loadProviders()">Refresh</button></span>
       </h2>
@@ -183,8 +212,9 @@
           those are chosen here and injected before the model sees anything.</div>
       </div>
     </section>
-
-    <section>
+</div>
+<div class="panel" id="panel-debug">
+<section>
       <h2>Debug
         <span class="sp">
           <label class="note" style="margin:0"><input type="checkbox" id="autotrace">
@@ -197,21 +227,22 @@
           the robot, then refresh.</div>
       </div>
     </section>
-
-    <section>
+</div>
+<div class="panel" id="panel-settings">
+<section>
       <h2>Configuration
         <span class="sp">
           <button class="pri" id="savebtn" onclick="saveCfg()">Save</button>
           <button onclick="resetCfg()">Defaults</button>
         </span>
       </h2>
-      <div class="body"><div class="grid" id="cfg"></div>
+      <div class="body"><div id="cfg"></div>
         <div class="note">Generation, retrieval and speech settings apply to the next
           question. Robot behaviour settings are read when the app starts, so restart
           it after changing them.</div>
       </div>
     </section>
-  </div>
+</div>
 </main>
 <div class="toast" id="toast"></div>
 
@@ -317,7 +348,12 @@ function field(k,v){
       : k==='conversation_backend'?['native','zeroclaw']
       : k==='addressing_mode'?['ambient','wake_word']
       : ['tiny.en','base.en','small.en','medium.en'];
-    const list = opts.length?opts:[v];
+    // The list comes from Ollama, but the configured model may belong to a
+    // hosted provider. Without this the select falls back to its first option
+    // and Save silently rewrites llm_model to something else entirely.
+    let list = opts.length?opts.slice():[];
+    if(v && !list.includes(v)) list.unshift(v);
+    if(!list.length) list = [v];
     return `<div class="fld"><label>${label}</label>
       <select id="${id}" onchange="markDirty()">`+
       list.map(o=>`<option ${o===v?'selected':''}>${esc(String(o))}</option>`).join('')+
@@ -358,11 +394,18 @@ async function loadCfg(){
   const grouped = new Set([].concat(...Object.values(GROUPS), ELSEWHERE));
   const other = Object.keys(CFG).filter(k=>!grouped.has(k));
   const sections = Object.entries(GROUPS).concat(other.length?[["Other",other]]:[]);
+  // Generation and Retrieval open by default; the rest are things you tune
+  // once and then want out of the way.
+  const OPEN = ["Generation","Conversation"];
   document.getElementById('cfg').innerHTML =
-    sections.map(([g,keys])=>
-      `<div class="grp">${g}</div>`+keys.filter(k=>k in CFG)
-        .map(k=>field(k,CFG[k])).join('')
-    ).join('');
+    sections.map(([g,keys])=>{
+      const fields = keys.filter(k=>k in CFG).map(k=>field(k,CFG[k])).join('');
+      if(!fields) return '';
+      return `<details class="grp" ${OPEN.includes(g)?'open':''}>
+        <summary>${g}<span class="note" style="margin-left:auto;text-transform:none;
+          letter-spacing:0">${keys.filter(k=>k in CFG).length} settings</span></summary>
+        <div class="grid">${fields}</div></details>`;
+    }).join('');
   markClean();
   // The robot panel edits the same config file, so it is filled from here.
   const hostsEl=document.getElementById('rhosts'), portEl=document.getElementById('rport');
@@ -673,6 +716,23 @@ async function status(){
   if(s.volume!=null){document.getElementById('vol').value=s.volume;
     document.getElementById('volv').textContent=s.volume;}
 }
+// Tabs. The last one used is remembered, because the thing you were doing is
+// almost always the thing you come back to.
+function showTab(name){
+  for(const el of document.querySelectorAll('.panel'))
+    el.classList.toggle('on', el.id === 'panel-'+name);
+  for(const el of document.querySelectorAll('.tab'))
+    el.classList.toggle('on', el.dataset.tab === name);
+  try{ localStorage.setItem('lancer_tab', name); }catch(e){}
+  // Refresh what the tab shows, so switching to it is never stale.
+  ({services:loadServices, debug:loadTraces, model:loadProviders,
+    settings:loadCfg, talk:refreshLog, robot:status}[name]||(()=>{}))();
+}
+let startTab = 'talk';
+try{ startTab = localStorage.getItem('lancer_tab') || 'talk'; }catch(e){}
+if(!document.getElementById('panel-'+startTab)) startTab = 'talk';
+showTab(startTab);
+
 loadCfg(); refreshLog(); status(); loadProviders(); loadTraces();
 setInterval(refreshLog,4000); setInterval(status,6000);
 </script>
