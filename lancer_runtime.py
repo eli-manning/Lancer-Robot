@@ -51,6 +51,11 @@ DEFAULTS: dict[str, Any] = {
     "addressing_mode": "ambient",
     # Seconds after he stops speaking during which a follow-up needs no name.
     "followup_window": 10.0,
+    # In wake_word mode, fold down and power off the motors once that quiet
+    # stretch passes with nobody saying anything. Costs a stand-up on the next
+    # wake, so the delay is worth raising if he is folding and unfolding all day.
+    "auto_sleep": True,
+    "auto_sleep_after": 10.0,
     # skills, memory and streaming
     # "native" runs the pipeline in server.py. "zeroclaw" hands the
     # conversation to the gateway over its WebSocket. The rollback from one to
@@ -173,6 +178,7 @@ LIMITS: dict[str, tuple[float, float]] = {
     "robot_port": (1, 65535),
     "resume_grace": (0.0, 60.0),
     "followup_window": (0.0, 120.0),
+    "auto_sleep_after": (5.0, 3600.0),
     "thinking_sound_volume": (0.0, 0.5),   # louder trips the barge-in gate
     "doa_deadband": (0.05, 1.5),
     "doa_yaw_sign": (-1.0, 1.0),

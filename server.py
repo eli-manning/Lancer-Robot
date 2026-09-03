@@ -96,12 +96,14 @@ async def lifespan(app: FastAPI):
                 logger.warning("Could not warm %s: %s", name, e)
 
     threading.Thread(target=_warm, daemon=True).start()
+    idle_watch = asyncio.create_task(_idle_sleep_watch())
     if ROBOT_ENABLED:
         from robot_actions import LancerRobot
         robot = LancerRobot()
         robot.greet()
         asyncio.create_task(voice_loop())
     yield
+    idle_watch.cancel()
     if robot:
         robot.stop_idle_behaviors()
 
@@ -1613,8 +1615,10 @@ _WAKE_RE = _re.compile(
 )
 
 
-# Until when a reply needs no wake word. Monotonic seconds; 0 means standby.
-_attention = {"until": 0.0}
+# Until when a reply needs no wake word, and when he last finished speaking.
+# "armed" means there has been a real conversation to go quiet after: a server
+# that has just started has nothing to fall asleep from.
+_attention = {"until": 0.0, "spoke_at": 0.0, "armed": False}
 
 
 def attentive() -> bool:
@@ -1626,9 +1630,46 @@ def is_asleep() -> bool:
     return bool(_sleep_state["asleep"])
 
 
+async def _idle_sleep_watch() -> None:
+    """
+    Fold him up when a wake-word conversation just stops.
+
+    This is the only part of the pipeline that acts without being spoken to,
+    which is why it is deliberately narrow: only in wake_word mode, only after
+    he has actually said something, and only once per conversation. A server
+    that has just started has nothing to fall asleep from.
+    """
+    while True:
+        await asyncio.sleep(1.0)
+        try:
+            cfg = rt.load()
+            if (not cfg.get("auto_sleep", True)
+                    or cfg.get("addressing_mode") != "wake_word"
+                    or not _attention["armed"] or is_asleep()):
+                continue
+            quiet_for = time.monotonic() - _attention["spoke_at"]
+            if quiet_for < float(cfg.get("auto_sleep_after") or 10.0):
+                continue
+            # Disarm first: the skill takes a couple of seconds, and a second
+            # pass through here would ask a sleeping robot to sleep again.
+            _attention["armed"] = False
+            _attention["until"] = 0.0
+            logger.info("Quiet for %.0fs -- going to sleep", quiet_for)
+            result = await asyncio.to_thread(
+                skills.run_skill, "rest", {"action": "sleep"})
+            if result.get("ok"):
+                _sleep_state["asleep"] = True
+            else:
+                logger.warning("Auto-sleep failed: %s", result.get("error"))
+        except Exception as e:                      # never take the loop down
+            logger.warning("Idle sleep watch: %s", e)
+
+
 def wake_robot() -> None:
     """Bring the robot back up and start answering again."""
     _sleep_state["asleep"] = False
+    # He has not spoken yet this conversation; the watcher re-arms when he does.
+    _attention["armed"] = False
     logger.info("Waking up")
     threading.Thread(
         target=skills.run_skill, args=("rest", {"action": "wake"}), daemon=True
@@ -2218,6 +2259,8 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True,
         playback_end = max(now, (speech["started"] or now) + speech["seconds"])
         _attention["until"] = (playback_end
                                + float(cfg.get("followup_window") or 0.0))
+        _attention["spoke_at"] = playback_end
+        _attention["armed"] = True
 
     yield {"type": "done", "heard": heard, "asleep": is_asleep(),
            "answer": answer, "sources": sources,

@@ -739,6 +739,17 @@ class Lancer:
         self._move_playing = playing
         return playing
 
+    def asleep_now(self) -> bool:
+        """
+        Asleep by either route.
+
+        The server tells us in a reply when a conversation ends in sleep, but
+        it can also fold him up on its own after a wake-word conversation goes
+        quiet, and that path has no reply to carry the flag. Powered-down
+        motors are the one signal true in both cases.
+        """
+        return self.sleeping or not self.motors_live()
+
     def hands_off(self) -> bool:
         """True when something else owns the joints and tracking must not move."""
         return (self.stopping or self.sleeping or not self.motors_live()
@@ -1303,7 +1314,7 @@ class LancerApp(ReachyMiniApp):  # type: ignore[misc]
             if meta.get("asleep") and not lancer.sleeping:
                 logger.info("Server says we are asleep -- tracking stands down")
             lancer.sleeping = bool(meta.get("asleep", lancer.sleeping))
-            lancer.cues.muted = lancer.sleeping
+            lancer.cues.muted = lancer.asleep_now()
             lancer.confused() if meta.get("unknown") else lancer.answering()
 
             # Each pass here is one interruption: work out whether it was real,
@@ -1406,7 +1417,13 @@ class LancerApp(ReachyMiniApp):  # type: ignore[misc]
                 # live so it can be woken by name, so without this it
                 # chirped at every conversation in the room while folded
                 # up -- which is exactly the opposite of being asleep.
-                if not lancer.sleeping:
+                #
+                # Motors, not just the server's flag: the server can put him
+                # to sleep on its own when a wake-word conversation goes quiet,
+                # and that path sends no reply for the flag to ride in on.
+                # goto_sleep powers the motors down, so their state is the one
+                # signal that is true however he came to be asleep.
+                if not lancer.asleep_now():
                     lancer.cues.heard()
                 frames = stream_server(audio, face_present)
                 if frames is None:
