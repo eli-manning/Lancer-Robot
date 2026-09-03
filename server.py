@@ -30,8 +30,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import chromadb
 import ollama
+import requests
 
 import lancer_llm as llm
+import lancer_net
 import lancer_memory as memory
 import lancer_runtime as rt
 import lancer_timers as timers
@@ -2056,6 +2058,41 @@ async def _timer_watch() -> None:
             logger.warning("Timer watch: %s", e)
 
 
+# How often the server checks whether the robot is actually folded up, rather
+# than trusting what it last remembered.
+_RECONCILE_EVERY = 5.0
+_last_reconcile = {"at": 0.0}
+
+
+def _reconcile_sleep() -> None:
+    """
+    Believe the motors, not our own memory.
+
+    Sleep state lived only in this process, so a server restart while the robot
+    was folded left the two disagreeing: the flag said awake, the robot was
+    down, and waking only ever happens inside `if is_asleep()`. He answered
+    questions perfectly well from a folded position and nothing would stand him
+    up, because as far as the server knew he was already standing.
+    """
+    if time.monotonic() - _last_reconcile["at"] < _RECONCILE_EVERY:
+        return
+    _last_reconcile["at"] = time.monotonic()
+    base = lancer_net.base()
+    if base is None:
+        return
+    try:
+        mode = requests.get(f"{base}/api/motors/status", timeout=2).json()
+    except (requests.RequestException, ValueError):
+        return
+    folded = str((mode or {}).get("mode", "")).lower() == "disabled"
+    if folded and not is_asleep():
+        logger.info("Robot is folded with motors off -- marking asleep")
+        _sleep_state["asleep"] = True
+    elif not folded and is_asleep():
+        logger.info("Robot is up with motors on -- marking awake")
+        _sleep_state["asleep"] = False
+
+
 async def _idle_sleep_watch() -> None:
     """
     Fold him up when a wake-word conversation just stops.
@@ -2068,6 +2105,7 @@ async def _idle_sleep_watch() -> None:
     while True:
         await asyncio.sleep(1.0)
         try:
+            await asyncio.to_thread(_reconcile_sleep)
             cfg = rt.load()
             if (not cfg.get("auto_sleep", True)
                     or cfg.get("addressing_mode") != "wake_word"
