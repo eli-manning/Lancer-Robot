@@ -1218,6 +1218,29 @@ async def chat(req: ChatRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/state")
+async def conversational_state() -> dict:
+    """
+    What Lancer is doing between turns.
+
+    Asleep and standby look similar from across a room but are not the same
+    thing: asleep is folded down with the motors off and only a name will wake
+    him; standby is upright and tracking, listening, and merely not answering
+    yet. Without this the dashboard could not tell them apart either.
+    """
+    remaining = max(0.0, _attention["until"] - time.monotonic())
+    return {
+        "asleep": is_asleep(),
+        "addressing_mode": str(rt.get("addressing_mode") or "ambient"),
+        "attentive": attentive(),
+        "listening_ms": int(remaining * 1000),
+        "posture": ("asleep" if is_asleep()
+                    else "listening" if attentive()
+                    else "standby" if rt.get("addressing_mode") == "wake_word"
+                    else "ambient"),
+    }
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "model": rt.get("llm_model"), "docs": collection.count()}

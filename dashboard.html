@@ -648,12 +648,19 @@ async function robot(a){toast(a+'…');
 async function setVolume(v){await fetch('/api/robot/volume?volume='+v,{method:'POST'});
   document.getElementById('volv').textContent=v;}
 async function status(){
-  const [s,st,svcs]=await Promise.all(
-    [F('/api/robot/status'),F('/api/stats'),loadServices()]);
+  const [s,st,svcs,cs]=await Promise.all(
+    [F('/api/robot/status'),F('/api/stats'),loadServices(),F('/state')]);
   SVC=svcs||[];
+  // Asleep and standby look the same from across the room; they are not the
+  // same thing. Standby is upright and tracking and simply waiting to be
+  // named; asleep is folded down with the motors off.
+  const posture = cs.posture ? (cs.posture === 'listening'
+    ? `listening ${Math.round((cs.listening_ms||0)/1000)}s`
+    : cs.posture) : null;
   document.getElementById('pills').innerHTML = `
     <span class="pill"><span class="dot ${s.online?'on':''}"></span>robot ${s.online?'online':'offline'}</span>
     <span class="pill">app <b>${s.app_state||'stopped'}</b></span>
+    ${posture?`<span class="pill"><span class="dot ${cs.asleep?'':'on'}"></span>${esc(posture)}</span>`:''}
     <span class="pill">motors <b>${(s.motors||'—').toString().replace('MotorControlMode.','')}</b></span>
     <span class="pill">loop <b>${s.control_hz||0} Hz</b></span>
     <span class="pill">chunks <b>${st.chunks ?? '—'}</b></span>

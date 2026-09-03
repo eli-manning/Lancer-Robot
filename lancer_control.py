@@ -56,7 +56,7 @@ SERVER_URL = f"http://127.0.0.1:{SERVER_PORT}"
 # which is what keeps config, providers, history and robot control usable while
 # the server is stopped.
 PROXIED = {
-    "GET": ["/api/traces", "/api/voices", "/api/stats"],
+    "GET": ["/api/traces", "/api/voices", "/api/stats", "/state"],
     "POST": ["/api/retrieve", "/api/ask"],
 }
 
