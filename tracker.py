@@ -54,9 +54,40 @@ def _score(box, width: int, height: int) -> float:
     return area / (width * height) + 0.35 * centrality
 
 
+# The freshest frame the robot has sent, for skills that need to see.
+_last_frame: dict = {"jpeg": None, "at": 0.0}
+
+
+def last_frame(max_age: float = 5.0) -> bytes | None:
+    """The current view, or None if the app is not sending frames."""
+    if not _last_frame["jpeg"] or time.time() - _last_frame["at"] > max_age:
+        return None
+    return _last_frame["jpeg"]
+
+
+def _announcement() -> dict | None:
+    import server
+
+    return server.take_announcement()
+
+
 @router.post("/api/track")
 async def track(file: UploadFile = File(...)) -> dict:
-    """Locate the most relevant person in a frame and return an aim point."""
+    """
+    Locate the most relevant person in a frame and return an aim point.
+
+    Also the delivery route for anything Lancer needs to say unprompted. The
+    app calls this several times a second already, so a timer going off reaches
+    the speaker within a frame without a second connection or a polling loop.
+    """
+    result = await _track(file)
+    say = _announcement()
+    if say:
+        result["say"] = say
+    return result
+
+
+async def _track(file: UploadFile) -> dict:
     started = time.perf_counter()
     raw = await file.read()
     try:
@@ -66,6 +97,10 @@ async def track(file: UploadFile = File(...)) -> dict:
 
     frame = np.asarray(image)
     height, width = frame.shape[:2]
+    # The most recent camera frame, kept for anything that wants to look
+    # through Lancer's eyes without asking the robot for another one.
+    _last_frame["jpeg"] = raw
+    _last_frame["at"] = time.time()
 
     try:
         results = _get_model().predict(

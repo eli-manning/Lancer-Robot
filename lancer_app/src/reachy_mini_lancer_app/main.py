@@ -594,6 +594,12 @@ class Lancer:
             except Exception:
                 reply = None
 
+            # Anything Lancer needs to say that nobody asked for -- a timer
+            # finishing -- rides back on this reply. It is the only path by
+            # which he speaks without having been spoken to.
+            if reply and reply.get("say"):
+                self.speak_announcement(reply["say"])
+
             now = time.monotonic()
             if reply and reply.get("found"):
                 if now - self._last_person > _AIM_RESET_AFTER or self.request_aim_reset:
@@ -749,6 +755,37 @@ class Lancer:
         motors are the one signal true in both cases.
         """
         return self.sleeping or not self.motors_live()
+
+    def speak_announcement(self, say: dict) -> None:
+        """
+        Play something Lancer brings up himself.
+
+        Never while he is already talking: an announcement cutting into an
+        answer sounds like two robots. It is dropped rather than queued -- a
+        timer said thirty seconds late has stopped being a timer.
+        """
+        if self.speaking or self.stopping:
+            logger.info("Announcement skipped, already speaking: %r",
+                        say.get("text", "")[:60])
+            return
+        audio = say.get("audio_b64")
+        logger.info("Announcing: %r", say.get("text", "")[:80])
+        if not audio:
+            return
+        try:
+            import base64 as _b64
+            import io as _io
+            import wave as _wave
+
+            raw = _b64.b64decode(audio)
+            with _wave.open(_io.BytesIO(raw)) as handle:
+                frames = handle.readframes(handle.getnframes())
+            mono = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+            self.cues.stop_thinking()
+            self.mini.media.push_audio_sample(
+                np.column_stack([mono, mono]).astype(np.float32))
+        except Exception as e:
+            logger.warning("Could not play announcement: %s", e)
 
     def hands_off(self) -> bool:
         """True when something else owns the joints and tracking must not move."""

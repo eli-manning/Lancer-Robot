@@ -42,7 +42,7 @@ def test_overheard_conversation_is_ignored():
 
 def test_follow_up_needs_no_name_inside_the_window():
     ok, why = addressed("What about tomorrow?", attentive=True)
-    assert ok and why == "follow-up window"
+    assert ok and why.startswith("follow-up")
 
 
 def test_follow_up_needs_the_name_once_the_window_closes():
@@ -70,3 +70,20 @@ def test_window_is_measured_from_when_playback_ends():
     assert server.attentive()
     server._attention["until"] = time.monotonic() - 0.1
     assert not server.attentive()
+
+
+def test_room_chatter_inside_the_window_does_not_count():
+    # The window exists so you can reply to him, not so anything said near him
+    # becomes a turn. Accepting anything meant each answer re-opened the
+    # window, so a conversation in the room kept him awake for ever.
+    for line in ("so I told her it was fine",
+                 "yeah, the meeting is at four",
+                 "and then you can keep the checkerware if you want"):
+        ok, why = addressed(line, attentive=True)
+        assert not ok, f"{line!r} should not have counted"
+        assert "standby" in why
+
+
+def test_a_real_follow_up_still_counts():
+    assert addressed("what about tomorrow?", attentive=True)[0]
+    assert addressed("tell me more about that", attentive=True)[0]

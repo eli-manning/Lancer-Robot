@@ -244,3 +244,6 @@ lancer_secrets.json
 
 # Supervisor pidfiles and service logs
 .run/
+
+# Pending timers are runtime state
+lancer_timers.json

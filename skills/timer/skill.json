@@ -1,0 +1,24 @@
+{
+  "name": "timer",
+  "description": "Set, list or cancel a countdown timer. Lancer announces it out loud himself when it finishes, so this is the right tool whenever someone wants to be told when an amount of time has passed -- cooking, laundry, a study break, 'remind me in ten minutes'. Give the duration exactly as the person said it.",
+  "risk": "self",
+  "spoken_wait": "",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": ["set", "list", "cancel"],
+        "description": "set a new timer, list what is running, or cancel one. Defaults to set."
+      },
+      "duration": {
+        "type": "string",
+        "description": "How long, in the words the person used: '5 minutes', 'an hour and a half', '90 seconds'. Required when setting."
+      },
+      "label": {
+        "type": "string",
+        "description": "What the timer is for, if they said: 'pasta', 'laundry'. Used to tell timers apart and to cancel one by name."
+      }
+    }
+  }
+}

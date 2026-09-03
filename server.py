@@ -33,6 +33,7 @@ import ollama
 import lancer_llm as llm
 import lancer_memory as memory
 import lancer_runtime as rt
+import lancer_timers as timers
 import lancer_skills as skills
 
 logging.basicConfig(level=logging.INFO)
@@ -97,6 +98,7 @@ async def lifespan(app: FastAPI):
 
     threading.Thread(target=_warm, daemon=True).start()
     idle_watch = asyncio.create_task(_idle_sleep_watch())
+    timer_watch = asyncio.create_task(_timer_watch())
     if ROBOT_ENABLED:
         from robot_actions import LancerRobot
         robot = LancerRobot()
@@ -104,6 +106,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(voice_loop())
     yield
     idle_watch.cancel()
+    timer_watch.cancel()
     if robot:
         robot.stop_idle_behaviors()
 
@@ -441,9 +444,20 @@ def is_addressed(text: str, face_present: bool,
         return True, "wake-word"
 
     if mode == "wake_word":
-        if attentive or interrupted:
-            return True, "follow-up window"
-        return False, "standby -- needs his name"
+        if interrupted:
+            return True, "interruption"
+        if not attentive:
+            return False, "standby -- needs his name"
+        # Inside the window, still ask whether this was plausibly aimed at him
+        # rather than accepting anything said nearby. Accepting anything meant
+        # passing conversation counted as a reply, he answered it, and
+        # answering re-opened the window -- so people talking near him kept him
+        # awake indefinitely and he never went to sleep, which is the opposite
+        # of what the mode is for. The standard is the ambient one: wake_word
+        # is ambient that stays switched off until he is named, and switches
+        # itself off again when nobody follows up.
+        ok, why = is_addressed(text, face_present, mode="ambient")
+        return ok, (f"follow-up ({why})" if ok else f"standby -- {why}")
 
     words = lowered.split()
     first = words[0].strip(",.!?") if words else ""
@@ -1587,9 +1601,9 @@ async def voice(file: UploadFile = File(...), face: bool = False):
 # whether to look something up is a model that can choose not to.
 SKILLS_BY_MODE = {
     "general": ["current_datetime", "weather", "web_lookup", "play_emotion",
-                "rest", "adjust_self"],
+                "rest", "adjust_self", "timer"],
     "guarded": ["current_datetime", "weather", "web_lookup", "play_emotion",
-                "rest", "adjust_self"],
+                "rest", "adjust_self", "timer"],
     "creative": ["current_datetime", "weather", "play_emotion", "adjust_self"],
     # The grounded route still gets no tools. Offering them costs a whole extra
     # model round trip before the first word, and this is the route where the
@@ -1628,6 +1642,56 @@ def attentive() -> bool:
 
 def is_asleep() -> bool:
     return bool(_sleep_state["asleep"])
+
+
+# Things to say that nobody asked for. Delivered on the back of /api/track,
+# which the app already calls several times a second for face tracking -- so an
+# announcement reaches the robot within a frame, with no polling loop, no
+# open socket and no change to how a turn works.
+_announcements: list[dict] = []
+
+
+def announce(text: str, kind: str = "timer") -> None:
+    if text:
+        _announcements.append({"text": text, "kind": kind, "at": time.time()})
+        logger.info("Queued announcement (%s): %r", kind, text)
+
+
+def take_announcement() -> dict | None:
+    """Hand over the next thing to say, with its audio ready to play."""
+    while _announcements:
+        item = _announcements.pop(0)
+        # Stale ones are dropped rather than said: a timer announced ten
+        # minutes late because the robot was off is worse than silence.
+        if time.time() - item["at"] > 120:
+            logger.info("Dropping stale announcement: %r", item["text"])
+            continue
+        try:
+            audio = synthesize(item["text"])
+        except Exception as e:
+            logger.warning("Could not synthesise announcement: %s", e)
+            return {"text": item["text"], "kind": item["kind"]}
+        return {"text": item["text"], "kind": item["kind"],
+                "audio_b64": base64.b64encode(audio).decode()}
+    return None
+
+
+async def _timer_watch() -> None:
+    """Fire finished timers. The only other thing that speaks unprompted."""
+    while True:
+        await asyncio.sleep(1.0)
+        try:
+            for timer in timers.due():
+                label = (timer.get("label") or "").strip()
+                spoken = timers.describe(timer.get("seconds", 0))
+                announce(f"That's your {label} timer, {spoken} is up."
+                         if label else f"Your {spoken} timer is up.")
+                # A timer going off is a reason to be awake: being folded up
+                # and announcing it to the ceiling helps nobody.
+                if is_asleep():
+                    wake_robot()
+        except Exception as e:
+            logger.warning("Timer watch: %s", e)
 
 
 async def _idle_sleep_watch() -> None:
