@@ -19,6 +19,7 @@ lancer_config.json -- that file is committed, and the dashboard writes to it.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -39,7 +40,12 @@ PROVIDERS = (OLLAMA, ANTHROPIC, GEMINI)
 SUGGESTED_MODELS = {
     OLLAMA: ["qwen2.5:14b", "qwen2.5:32b", "qwen2.5:3b", "mistral:latest"],
     ANTHROPIC: ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
-    GEMINI: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
+    # Checked against the live model list. gemini-2.0-flash was in here and has
+    # since been retired -- the API answers a 404 telling you to move on, which
+    # surfaces as a robot that has simply stopped talking. "-latest" tracks
+    # whatever is current, at the cost of changing under you.
+    GEMINI: ["gemini-2.5-flash", "gemini-flash-latest", "gemini-3-flash-preview",
+             "gemini-2.5-pro", "gemini-3.1-pro-preview", "gemini-2.5-flash-lite"],
 }
 
 # Short answers said out loud. Not a cost measure: the sentence limit downstream
@@ -448,6 +454,70 @@ def _stream_gemini(messages: list[dict], model: str,
                     text = part.get("text")
                     if text:
                         yield text
+
+
+def describe_image(jpeg: bytes, question: str, model: str, provider: str,
+                   options: dict | None = None) -> str:
+    """
+    Ask the model what it can see.
+
+    Only Gemini and Anthropic take images; the local models here are text-only,
+    so this raises rather than returning something invented. A robot that
+    describes a room it cannot see is worse than one that says it cannot see.
+    """
+    options = options or {}
+    if provider == GEMINI:
+        import requests
+
+        key = api_key(GEMINI)
+        if not key:
+            raise RuntimeError("no Gemini API key configured")
+        body = {
+            "contents": [{"role": "user", "parts": [
+                {"inline_data": {"mime_type": "image/jpeg",
+                                 "data": base64.b64encode(jpeg).decode()}},
+                {"text": question},
+            ]}],
+            "generationConfig": {"maxOutputTokens": MAX_OUTPUT_TOKENS,
+                                 "temperature": float(
+                                     options.get("temperature", 0.4))},
+        }
+        response = requests.post(_gemini_url(model, "generateContent"), json=body,
+                                 timeout=60, headers={"x-goog-api-key": key})
+        if not response.ok:
+            raise RuntimeError(
+                f"Gemini returned {response.status_code}: {response.text[:300]}")
+        candidates = response.json().get("candidates") or []
+        parts = (candidates[0].get("content", {}).get("parts", [])
+                 if candidates else [])
+        return "".join(p["text"] for p in parts if p.get("text")).strip()
+
+    if provider == ANTHROPIC:
+        import anthropic
+
+        key = api_key(ANTHROPIC)
+        if not key:
+            raise RuntimeError("no Anthropic API key configured")
+        client = anthropic.Anthropic(api_key=key)
+        message = client.messages.create(
+            model=model or SUGGESTED_MODELS[ANTHROPIC][0],
+            max_tokens=MAX_OUTPUT_TOKENS,
+            messages=[{"role": "user", "content": [
+                {"type": "image", "source": {
+                    "type": "base64", "media_type": "image/jpeg",
+                    "data": base64.b64encode(jpeg).decode()}},
+                {"type": "text", "text": question},
+            ]}],
+        )
+        return "".join(b.text for b in message.content
+                       if getattr(b, "type", "") == "text").strip()
+
+    raise RuntimeError(f"{provider} cannot see images -- switch to Gemini "
+                       f"or Anthropic to use the camera")
+
+
+def sees(provider: str) -> bool:
+    return provider in (GEMINI, ANTHROPIC)
 
 
 def complete(messages: list[dict], model: str, provider: str = OLLAMA,

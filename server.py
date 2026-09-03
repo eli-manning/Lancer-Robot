@@ -1601,10 +1601,11 @@ async def voice(file: UploadFile = File(...), face: bool = False):
 # whether to look something up is a model that can choose not to.
 SKILLS_BY_MODE = {
     "general": ["current_datetime", "weather", "web_lookup", "play_emotion",
-                "rest", "adjust_self", "timer"],
+                "rest", "adjust_self", "timer", "look"],
     "guarded": ["current_datetime", "weather", "web_lookup", "play_emotion",
-                "rest", "adjust_self", "timer"],
-    "creative": ["current_datetime", "weather", "play_emotion", "adjust_self"],
+                "rest", "adjust_self", "timer", "look"],
+    "creative": ["current_datetime", "weather", "play_emotion", "adjust_self",
+                 "look"],
     # The grounded route still gets no tools. Offering them costs a whole extra
     # model round trip before the first word, and this is the route where the
     # answer matters most and the retrieval is already measured. Gestures on
@@ -2159,9 +2160,11 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True,
             # Certain questions get their source fetched outright, before the
             # model is consulted about it.
             required = [n for n in prefetch_for(heard) if n in allowed]
+            prefetched: list[dict] = []
             for name in required:
                 result = await asyncio.to_thread(skills.run_skill, name, {})
-                calls.append({"skill": name, "arguments": {}, "result": result})
+                prefetched.append({"skill": name, "arguments": {},
+                                   "result": result})
                 messages = [*messages[:-1], {
                     "role": "system",
                     "content": (f"Live result from {name} -- this is current and "
@@ -2169,14 +2172,20 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True,
                                 f"it:\n{json.dumps(result)}"),
                 }, messages[-1]]
 
-            # Only ask the model to choose tools when the deterministic route
-            # did not already cover the question. Skipping it saves a whole
-            # round trip on the most common skill turns.
-            if not required:
-                messages, calls = await asyncio.to_thread(
-                    skills.gather, model, messages, plan["options"],
-                    allowed, False, None,
-                )
+            # The model gets to choose tools even when a rule already fired.
+            # Skipping that saved a round trip but assumed the prefetch had
+            # covered the question, and a rule matching on a weak cue quietly
+            # takes the choice away: "what do you see right now" matched the
+            # date rule on "right now", so the camera was never reached and he
+            # described a room he had not looked at. Whatever the rules
+            # prefetched is already in context, so this is an addition to it.
+            extra, calls = await asyncio.to_thread(
+                skills.gather, model, messages, plan["options"],
+                [n for n in allowed if n not in required], False, None,
+            )
+            if calls:
+                messages = extra
+            calls = prefetched + calls
             for call in calls:
                 skill = skills.load_skills().get(call["skill"])
                 trace["skills"].append({

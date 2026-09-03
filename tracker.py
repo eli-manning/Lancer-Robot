@@ -71,6 +71,24 @@ def _announcement() -> dict | None:
     return server.take_announcement()
 
 
+@router.get("/api/frame")
+async def current_frame():
+    """
+    The robot's current view as a JPEG.
+
+    Served rather than pushed because skills are subprocesses: the one that
+    looks through his eyes is a different program from the one holding the
+    frame. Empty when the app is not sending, which is the honest answer -- a
+    stale frame would have him describing a room he left.
+    """
+    from fastapi import Response
+
+    jpeg = last_frame()
+    if jpeg is None:
+        return Response(status_code=503, content=b"", media_type="image/jpeg")
+    return Response(content=jpeg, media_type="image/jpeg")
+
+
 @router.post("/api/track")
 async def track(file: UploadFile = File(...)) -> dict:
     """

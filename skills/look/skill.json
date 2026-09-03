@@ -1,0 +1,15 @@
+{
+  "name": "look",
+  "description": "Look through your camera and describe what you actually see right now. Use it whenever someone asks what you can see, who is there, what they are holding or wearing, what is written on something they show you, or to comment on the room. Do not guess at any of these without calling this first -- you cannot see anything until you do.",
+  "risk": "read",
+  "spoken_wait": "Let me take a look.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "question": {
+        "type": "string",
+        "description": "What to look for, in plain words: 'what am I holding', 'what does this sign say', 'who is in front of you', 'describe the room'. Defaults to a general description."
+      }
+    }
+  }
+}
