@@ -1547,9 +1547,11 @@ async def voice(file: UploadFile = File(...), face: bool = False):
 # gets none: its retrieval is measured at 87% top-1 and a model that can choose
 # whether to look something up is a model that can choose not to.
 SKILLS_BY_MODE = {
-    "general": ["current_datetime", "weather", "web_lookup", "play_emotion", "rest"],
-    "guarded": ["current_datetime", "weather", "web_lookup", "play_emotion", "rest"],
-    "creative": ["current_datetime", "weather", "play_emotion"],
+    "general": ["current_datetime", "weather", "web_lookup", "play_emotion",
+                "rest", "adjust_self"],
+    "guarded": ["current_datetime", "weather", "web_lookup", "play_emotion",
+                "rest", "adjust_self"],
+    "creative": ["current_datetime", "weather", "play_emotion", "adjust_self"],
     # The grounded route still gets no tools. Offering them costs a whole extra
     # model round trip before the first word, and this is the route where the
     # answer matters most and the retrieval is already measured. Gestures on
@@ -2030,6 +2032,21 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True,
                 note_sleep_change(calls)
                 clock = stage(trace, "skills", clock,
                               called=[c["skill"] for c in calls])
+                if is_asleep():
+                    # Going to sleep is the answer. A parting line means the
+                    # speaker is still playing while the body folds down, the
+                    # microphone hears it, and the last thing he does before
+                    # going quiet is talk over himself.
+                    trace["route"] = "sleep"
+                    trace["answer"] = ""
+                    stage(trace, "total", started)
+                    _traces.appendleft(trace)
+                    yield {"type": "done", "heard": heard, "asleep": True,
+                           "answer": "", "sources": [], "unknown": False,
+                           "latency_ms": int((time.monotonic() - started) * 1000),
+                           "skills": [c["skill"] for c in calls],
+                           "more_available": False}
+                    return
 
         verify = plan.get("verify", "none")
         context = plan.get("context", "")
@@ -2143,6 +2160,48 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True,
            "more_available": bool(_remainder["text"])}
 
 
+def _audio_level(path: Path) -> dict:
+    """
+    How loud the audio actually is, and in what format.
+
+    Whisper returning nothing looks identical whether the microphone captured
+    silence, the gain is far too low, or the WAV is malformed -- and the trace
+    showed only the empty transcript, so all three read as "it did not hear me".
+    Measuring here separates them in one turn instead of an evening.
+    """
+    import wave
+
+    import numpy as np
+
+    try:
+        with wave.open(str(path)) as handle:
+            channels = handle.getnchannels()
+            rate = handle.getframerate()
+            width = handle.getsampwidth()
+            frames = handle.readframes(handle.getnframes())
+    except (wave.Error, EOFError, OSError) as e:
+        return {"audio_error": f"not a readable WAV: {e}"}
+
+    if width != 2 or not frames:
+        return {"audio_rate": rate, "audio_channels": channels,
+                "audio_width": width, "audio_rms": None}
+    samples = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+    if samples.size == 0:
+        return {"audio_rate": rate, "audio_channels": channels, "audio_rms": 0.0}
+    rms = float(np.sqrt(np.mean(samples ** 2)))
+    peak = float(np.max(np.abs(samples)))
+    return {
+        "audio_rate": rate,
+        "audio_channels": channels,
+        "audio_rms": round(rms, 5),
+        "audio_peak": round(peak, 4),
+        # Speech at a normal distance sits near 0.02-0.2 RMS. Below about 0.002
+        # there is nothing for Whisper to work with, whatever the duration says.
+        "audio_verdict": ("silent" if rms < 0.002 else
+                          "very quiet" if rms < 0.01 else "audible"),
+    }
+
+
 @app.post("/voice/stream")
 async def voice_stream(file: UploadFile = File(...), face: bool = False,
                        interrupted: bool = False):
@@ -2160,10 +2219,18 @@ async def voice_stream(file: UploadFile = File(...), face: bool = False,
         wav_path = Path(tmp) / "in.wav"
         audio = await file.read()
         wav_path.write_bytes(audio)
+        level = _audio_level(wav_path)
         heard = await asyncio.to_thread(transcribe, str(wav_path))
+    if level.get("audio_verdict") in ("silent", "very quiet"):
+        logger.warning("[stream] audio was %s (rms %s, peak %s, %s Hz, %s ch) -- "
+                       "the microphone captured almost nothing",
+                       level["audio_verdict"], level.get("audio_rms"),
+                       level.get("audio_peak"), level.get("audio_rate"),
+                       level.get("audio_channels"))
 
     trace = new_trace(heard=heard, source="voice", face_present=face,
-                      audio_seconds=round(len(audio) / (16000 * 2), 2))
+                      audio_seconds=round(len(audio) / (16000 * 2), 2),
+                      **level)
     clock = stage(trace, "transcribe", clock, text=heard,
                   model=rt.get("whisper_model"))
 

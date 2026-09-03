@@ -1,0 +1,20 @@
+{
+  "name": "adjust_self",
+  "description": "Change how you present yourself: your speaker volume, how fast you talk, your voice, how much you say, how strongly you follow faces, and whether you make a thinking sound. Call this whenever someone asks you to be louder, quieter, faster, slower, briefer, chattier, or to change your voice -- and also when you decide on your own that it would help, for example turning yourself down when someone says you are too loud for the room. Call it with a setting and no value to report what that setting is now, or with no setting at all to report all of them.",
+  "risk": "self",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "setting": {
+        "type": "string",
+        "enum": ["volume", "speech_speed", "voice", "talkativeness",
+                 "face_tracking", "thinking_sound"],
+        "description": "Which part of yourself to adjust. Omit to report everything."
+      },
+      "value": {
+        "type": "string",
+        "description": "Either a relative word (up, down, louder, quieter, faster, slower, max, min, on, off) or an exact value (a number 0-100 for volume, 0.5-2.0 for speech_speed, a voice name such as bm_george). Omit to report the setting's current value without changing it."
+      }
+    }
+  }
+}

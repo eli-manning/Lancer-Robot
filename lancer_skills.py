@@ -45,12 +45,20 @@ MAX_TOOL_ITERATIONS = 4
 #             physical, so it is not "read", but nothing it does persists or
 #             reaches anyone else, and requiring approval to nod would make the
 #             gesture arrive long after the sentence it belonged to.
+#   self   -- changes how Lancer presents himself: volume, pace, voice, brevity.
+#             It persists, which "motion" does not, but it is reversible by
+#             asking, obvious from the outside the moment it takes effect, and
+#             reaches nothing beyond this robot. "Turn yourself down, you're too
+#             loud" should not need a person at a dashboard.
+#             What that tier may touch is an allowlist in the skill itself, and
+#             it deliberately excludes anything Lancer would have an incentive
+#             to relax: interruption, grounding checks, retrieval thresholds.
 #
 # Anything that acts on the world -- writes a file, sends a message, calls an
 # API that changes something -- gets no tier here and must be approved. Nothing
 # shipped today is in that category; the gate exists so the first skill that is
 # does not quietly inherit a nod's permissions.
-AUTO_APPROVED_RISKS = {"read", "motion"}
+AUTO_APPROVED_RISKS = {"read", "motion", "self"}
 
 
 class Skill:
