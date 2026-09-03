@@ -1037,25 +1037,22 @@ async def _process_query(query: str, history: list[dict] = []) -> tuple[str, lis
             "You have no CBU documents for this one -- keep it general."
         )
         logger.info("Creative turn (context %s)", "used" if relevant else "none")
-        response = ollama.chat(
-            model=cfg["llm_model"],
-            messages=[
+        answer = _generate(
+            [
                 {"role": "system", "content": CREATIVE_PROMPT},
                 {"role": "system", "content": grounding},
                 *history[-int(rt.get("history_turns")):],
                 {"role": "user", "content": query},
             ],
-            options={"temperature": max(float(cfg["temperature"]), 0.7)},
+            {"temperature": max(float(cfg["temperature"]), 0.7)},
         )
-        answer = response["message"]["content"]
         # Only block invented specifics; prose about CBU in general is fine here.
         bad = [c for c in _unsupported_claims(answer, context)
                if _re.search(r"[A-Z]{2,}\s*\d|Dr|Prof|President|Dean|Chair", str(c))]
         if bad:
             logger.info("Creative answer invented specifics %s -- retrying", bad[:3])
-            response = ollama.chat(
-                model=cfg["llm_model"],
-                messages=[
+            answer = _generate(
+                [
                     {"role": "system", "content": CREATIVE_PROMPT},
                     {"role": "user", "content": query},
                     {"role": "assistant", "content": answer},
@@ -1063,9 +1060,8 @@ async def _process_query(query: str, history: list[dict] = []) -> tuple[str, lis
                      "Drop the specific course codes, names and figures you made "
                      "up and say it in general terms instead. Keep the humour."},
                 ],
-                options={"temperature": 0.7},
+                {"temperature": 0.7},
             )
-            answer = response["message"]["content"]
         return answer, (sources if relevant else [])
     if not relevant:
         # Nothing in the corpus covers this. Refusing outright made Lancer feel
@@ -1081,11 +1077,7 @@ async def _process_query(query: str, history: list[dict] = []) -> tuple[str, lis
             *history[-int(rt.get("history_turns")):],
             {"role": "user", "content": query},
         ]
-        response = ollama.chat(
-            model=cfg["llm_model"], messages=messages,
-            options={"temperature": cfg["temperature"]},
-        )
-        answer = response["message"]["content"]
+        answer = _generate(messages, {"temperature": cfg["temperature"]})
         # The prompt forbids CBU claims here, but a 3B model will still slip
         # ("Lancer Hall" was invented this way). Enforce it rather than ask.
         if _re.search(r"\b(cbu|california baptist|lancer hall|campus)\b",
@@ -1102,12 +1094,7 @@ async def _process_query(query: str, history: list[dict] = []) -> tuple[str, lis
         {"role": "user", "content": query},
     ]
     cfg = rt.load()
-    response = ollama.chat(
-        model=cfg["llm_model"],
-        messages=messages,
-        options={"temperature": cfg["temperature"]},
-    )
-    answer = response["message"]["content"]
+    answer = _generate(messages, {"temperature": cfg["temperature"]})
 
     if bool(cfg.get("verify_grounding", True)):
         bad = _unsupported_claims(answer, context)
@@ -1124,16 +1111,29 @@ async def _process_query(query: str, history: list[dict] = []) -> tuple[str, lis
                     "you do not have that detail instead."
                 ),
             })
-            response = ollama.chat(
-                model=cfg["llm_model"], messages=messages, options={"temperature": 0.0}
-            )
-            answer = response["message"]["content"]
+            answer = _generate(messages, {"temperature": 0.0})
             still_bad = _unsupported_claims(answer, context)
             if still_bad:
                 logger.info("Still unsupported %s -- refusing", still_bad[:4])
                 return _random.choice(MISS_REPLIES), []
 
     return answer, sources
+
+
+def _generate(messages: list[dict], options: dict | None = None) -> str:
+    """
+    One complete answer from whichever provider is configured.
+
+    Every call in the non-streaming path used to be ollama.chat with the
+    configured model name. Switching to Anthropic or Gemini therefore 404'd the
+    typed path against Ollama, while the voice path -- already routed through
+    the provider layer -- answered normally. Same pipeline, two different
+    answers to "does Gemini work", which is the worst kind of bug to debug from
+    the outside.
+    """
+    cfg = rt.load()
+    return llm.complete(messages, cfg["llm_model"],
+                        str(cfg.get("llm_provider") or llm.OLLAMA), options or {})
 
 
 async def _respond_with_robot(output: str) -> None:
