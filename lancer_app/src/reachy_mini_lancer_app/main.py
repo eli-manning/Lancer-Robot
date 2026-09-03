@@ -456,10 +456,15 @@ class Lancer:
 
                 if kind == "status":
                     if frame.get("state") == "skill":
-                        # Going out to a live source. Say so with a chirp
-                        # rather than a silence people read as a hang.
+                        # Going out to a live source. Say so out loud when the
+                        # server sent a line for it -- "let me check" is what a
+                        # person does with the same pause, and it covers the
+                        # round trip far better than a chirp does. The chirp
+                        # stays for skills too fast to be worth narrating.
                         self.cues.stop_thinking()
-                        if frame.get("ok", True):
+                        if frame.get("say_audio_b64"):
+                            self.play_wav_b64(frame["say_audio_b64"])
+                        elif frame.get("ok", True):
                             self.cues.skill()
                         else:
                             self.cues.error()
@@ -803,16 +808,19 @@ class Lancer:
             logger.info("Announcement skipped, already speaking: %r",
                         say.get("text", "")[:60])
             return
-        audio = say.get("audio_b64")
         logger.info("Announcing: %r", say.get("text", "")[:80])
-        if not audio:
+        self.play_wav_b64(say.get("audio_b64"))
+
+    def play_wav_b64(self, audio_b64: str | None) -> None:
+        """Play a base64 16 kHz mono WAV through the speaker."""
+        if not audio_b64:
             return
         try:
             import base64 as _b64
             import io as _io
             import wave as _wave
 
-            raw = _b64.b64decode(audio)
+            raw = _b64.b64decode(audio_b64)
             with _wave.open(_io.BytesIO(raw)) as handle:
                 frames = handle.readframes(handle.getnframes())
             mono = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
@@ -820,7 +828,7 @@ class Lancer:
             self.mini.media.push_audio_sample(
                 np.column_stack([mono, mono]).astype(np.float32))
         except Exception as e:
-            logger.warning("Could not play announcement: %s", e)
+            logger.warning("Could not play audio: %s", e)
 
     def hands_off(self) -> bool:
         """True when something else owns the joints and tracking must not move."""

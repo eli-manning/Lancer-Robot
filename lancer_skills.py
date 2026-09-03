@@ -228,6 +228,7 @@ def gather(
     approve: bool = False,
     on_call=None,
     provider: str | None = None,
+    done: dict[str, dict] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """
     Run only the tool phase, and hand back the messages the answer builds on.
@@ -297,13 +298,21 @@ def gather(
                     arguments = json.loads(arguments)
                 except json.JSONDecodeError:
                     arguments = {}
-            if on_call:
-                try:
-                    on_call(name, arguments)
-                except Exception:
-                    pass
+            def announce_call() -> None:
+                # Only once something is definitely going to happen. Saying
+                # "let me check" in front of a call that is about to be refused
+                # is worse than saying nothing.
+                if on_call:
+                    try:
+                        on_call(name, arguments)
+                    except Exception:
+                        pass
+
             skill = load_skills().get(name)
-            if skill is not None and skill.concurrent and name in offered:
+            already = bool(done and name in done)
+            if (skill is not None and skill.concurrent and name in offered
+                    and not already):
+                announce_call()
                 # Started and left to run. The model gets an immediate result
                 # so the tool loop can finish and the answer can begin.
                 threading.Thread(target=run_skill, args=(name, arguments),
@@ -316,7 +325,15 @@ def gather(
                 working.append({"role": "tool", "name": name,
                                 "content": json.dumps(result)})
                 continue
-            if name not in offered:
+            if already:
+                # It already ran this turn by rule. Hand back what it returned
+                # rather than refusing: being told "weather is not available"
+                # after the weather had been fetched made him answer that his
+                # sensor was broken, holding a good reading the whole time.
+                logger.info("%s already ran this turn; reusing its result", name)
+                result = dict(done[name])
+                result["note"] = "already fetched this turn; this is the result"
+            elif name not in offered:
                 # Refused, and told why, so the model can answer without it
                 # rather than looping on a tool it cannot have. Gemini asked
                 # for `look` on a turn where look had deliberately been
@@ -326,8 +343,11 @@ def gather(
                 logger.warning("Refusing %s: not offered this turn (offered %s)",
                                name, sorted(offered))
                 result = {"ok": False,
-                          "error": f"{name} is not available on this turn"}
+                          "error": f"{name} was not offered on this turn; "
+                                   "answer without it, and do not describe it "
+                                   "as broken or unavailable"}
             else:
+                announce_call()
                 result = run_skill(name, arguments, approve=approve)
             calls.append({"skill": name, "arguments": arguments, "result": result})
             logger.info("Tool call %s(%s) -> ok=%s", name, arguments, result.get("ok"))

@@ -22,6 +22,7 @@ import random as _random
 import re
 import re as _re
 import threading
+import queue as _queue
 import time
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
@@ -96,7 +97,18 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.warning("Could not warm %s: %s", name, e)
 
+    def _warm_phrases() -> None:
+        # Every filler line, rendered once. Doing it on demand costs a third of
+        # a second in front of the gap the line exists to cover.
+        for phrases in WAIT_PHRASES.values():
+            for phrase in phrases:
+                wait_audio(phrase)
+        for phrase in _DEFAULT_WAITS:
+            wait_audio(phrase)
+        logger.info("Warmed %d wait phrases", len(_wait_audio_cache))
+
     threading.Thread(target=_warm, daemon=True).start()
+    threading.Thread(target=_warm_phrases, daemon=True).start()
     idle_watch = asyncio.create_task(_idle_sleep_watch())
     timer_watch = asyncio.create_task(_timer_watch())
     if ROBOT_ENABLED:
@@ -1305,6 +1317,7 @@ async def conversational_state() -> dict:
     """
     remaining = max(0.0, _attention["until"] - time.monotonic())
     return {
+        "ringing": is_ringing(),
         "asleep": is_asleep(),
         "addressing_mode": str(rt.get("addressing_mode") or "ambient"),
         "attentive": attentive(),
@@ -1843,6 +1856,50 @@ def take_announcement() -> dict | None:
 ALARM_VOLUME = 0.30
 
 
+# Something to say while a skill runs, so the gap is filled by a person
+# thinking rather than by a machine hanging. Varied on purpose: the same four
+# words every time is worse than silence within about a day.
+WAIT_PHRASES = {
+    "weather": ["Let me check.", "One sec, checking.", "Looking outside now."],
+    "web_lookup": ["Let me look that up.", "Bringing that up now.",
+                   "One moment, looking."],
+    "cbu_documents": ["Let me check.", "Looking that up.", "One second."],
+    "look": ["Let me take a look.", "Hang on, looking.", "Let me see."],
+    "timer": ["Setting that now.", "On it."],
+    "current_datetime": [],          # instant; a filler would land after it
+    "play_emotion": [],
+    "adjust_self": [],
+    "rest": [],
+}
+_DEFAULT_WAITS = ["One moment.", "Let me check.", "One sec."]
+_wait_audio_cache: dict[str, str] = {}
+
+
+def wait_line(skill_name: str) -> str:
+    """A filler line for this skill, or "" when it is fast enough not to need one."""
+    phrases = WAIT_PHRASES.get(skill_name, _DEFAULT_WAITS)
+    return _random.choice(phrases) if phrases else ""
+
+
+def wait_audio(phrase: str) -> str | None:
+    """
+    The filler as ready-to-play audio, synthesised once and kept.
+
+    Rendering it on demand would cost a third of a second in front of the gap
+    it exists to cover, which is the wrong way round.
+    """
+    if not phrase:
+        return None
+    if phrase not in _wait_audio_cache:
+        try:
+            _wait_audio_cache[phrase] = base64.b64encode(
+                synthesize(phrase)).decode()
+        except Exception as e:
+            logger.warning("Could not synthesise wait phrase %r: %s", phrase, e)
+            return None
+    return _wait_audio_cache[phrase]
+
+
 def cue_wav(kind: str, volume: float | None = None) -> bytes:
     """
     A short non-speech cue as 16 kHz mono WAV.
@@ -1914,6 +1971,18 @@ async def say_something(payload: dict) -> dict:
     return {"ok": True, "text": text, "queued": len(_announcements)}
 
 
+_STOP_ALARM_RE = _re.compile(
+    r"\b(stop|okay|ok|alright|all right|thanks|thank you|got it|enough|"
+    r"quiet|shut up|turn it off|shut it off|i'?m coming|coming|heard you|"
+    r"yes|yep|done)\b", _re.I)
+
+
+@app.post("/api/alarm/stop")
+async def silence_alarm() -> dict:
+    """Stop a ringing timer from the dashboard."""
+    return {"ok": True, "was_ringing": stop_ringing("dashboard")}
+
+
 @app.post("/api/cue")
 async def play_cue(payload: dict) -> dict:
     """Play one of the non-speech cues through the robot's speaker."""
@@ -1922,21 +1991,67 @@ async def play_cue(payload: dict) -> dict:
     return {"ok": True, "cue": kind}
 
 
+# A timer that beeps once is a notification. It keeps ringing until somebody
+# deals with it, which is the entire difference.
+_ringing = {"active": False, "since": 0.0, "last": 0.0, "label": ""}
+ALARM_REPEAT = 3.5          # seconds between rings
+ALARM_GIVES_UP_AFTER = 120  # nobody is coming; stop before it becomes furniture
+# The first ring has to get your attention. The ones after that only have to
+# remind you, and at full volume they stop being a reminder and start being a
+# reason to unplug the robot.
+ALARM_LOUD_FOR = 3.0
+ALARM_QUIET_VOLUME = 0.16
+
+
+def stop_ringing(why: str = "acknowledged") -> bool:
+    """Silence the alarm. Returns whether it was actually ringing."""
+    if not _ringing["active"]:
+        return False
+    _ringing["active"] = False
+    logger.info("Alarm stopped (%s)", why)
+    # Drop any rings already queued but not yet collected, or it keeps going
+    # for a few seconds after being told to stop, which reads as ignoring you.
+    _announcements[:] = [a for a in _announcements if a.get("kind") != "alarm"]
+    return True
+
+
+def is_ringing() -> bool:
+    return bool(_ringing["active"])
+
+
 async def _timer_watch() -> None:
-    """Fire finished timers. The only other thing that speaks unprompted."""
+    """Fire finished timers, and keep ringing until told to stop."""
     while True:
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(0.5)
         try:
             for timer in timers.due():
                 label = (timer.get("label") or "").strip()
                 spoken = timers.describe(timer.get("seconds", 0))
                 announce(f"That's your {label} timer, {spoken} is up."
                          if label else f"Your {spoken} timer is up.",
-                         prefix=cue_wav("alarm"))
+                         kind="alarm", prefix=cue_wav("alarm"))
+                _ringing.update({"active": True, "since": time.monotonic(),
+                                 "last": time.monotonic(), "label": label})
                 # A timer going off is a reason to be awake: being folded up
                 # and announcing it to the ceiling helps nobody.
                 if is_asleep():
                     wake_robot()
+
+            if not _ringing["active"]:
+                continue
+            now = time.monotonic()
+            if now - _ringing["since"] > ALARM_GIVES_UP_AFTER:
+                stop_ringing("nobody answered")
+                continue
+            if now - _ringing["last"] >= ALARM_REPEAT:
+                _ringing["last"] = now
+                # The tone only after the first time. Repeating the sentence
+                # every few seconds is what makes people unplug things -- and
+                # it backs off in volume once it has your attention.
+                loud = (now - _ringing["since"]) < ALARM_LOUD_FOR
+                announce("", kind="alarm",
+                         audio=cue_wav("alarm",
+                                       None if loud else ALARM_QUIET_VOLUME))
         except Exception as e:
             logger.warning("Timer watch: %s", e)
 
@@ -2472,9 +2587,10 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True,
             required = [n for n, _ in plan_skills]
             prefetched: list[dict] = []
             for name, arguments in plan_skills:
+                phrase = wait_line(name)
                 yield {"type": "status", "state": "skill", "skill": name,
-                       "say": getattr(skills.load_skills().get(name),
-                                      "spoken_wait", None), "ok": True}
+                       "say": phrase or None,
+                       "say_audio_b64": wait_audio(phrase), "ok": True}
                 skill = skills.load_skills().get(name)
                 if skill is not None and skill.concurrent:
                     threading.Thread(target=skills.run_skill,
@@ -2508,10 +2624,28 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True,
             # prefetched is already in context, so this is an addition to it.
             offer = [n for n in allowed if n not in required]
             logger.debug("[skills] prefetched=%s offering=%s", required, offer)
-            extra, calls = await asyncio.to_thread(
-                skills.gather, model, messages, plan["options"],
-                offer, False, None,
-            )
+            # gather runs in a thread and cannot yield, so it hands each skill
+            # name to a queue as it starts one. Draining that while waiting is
+            # what lets "let me look that up" land *before* the lookup rather
+            # than after it, which is the whole point of saying it.
+            announcing: _queue.Queue = _queue.Queue()
+            task = asyncio.create_task(asyncio.to_thread(
+                skills.gather, model, messages, plan["options"], offer, False,
+                lambda name, arguments: announcing.put(name), None,
+                {c["skill"]: c["result"] for c in prefetched},
+            ))
+            while not task.done():
+                try:
+                    name = announcing.get_nowait()
+                except _queue.Empty:
+                    await asyncio.sleep(0.04)
+                    continue
+                phrase = wait_line(name)
+                if phrase:
+                    yield {"type": "status", "state": "skill", "skill": name,
+                           "say": phrase, "say_audio_b64": wait_audio(phrase),
+                           "ok": True}
+            extra, calls = await task
             logger.debug("[skills] model chose %s",
                          [c["skill"] for c in calls])
             if calls:
@@ -2535,8 +2669,9 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True,
                     "result": json.dumps(call["result"])[:900],
                 })
                 yield {"type": "status", "state": "skill", "skill": call["skill"],
-                       "say": None if announced
-                              else getattr(skill, "spoken_wait", None),
+                       "say": None,      # it has already run; saying "let me
+                                         # check" now would be checking after
+                                         # the fact
                        "ok": bool(call["result"].get("ok"))}
             if calls:
                 note_sleep_change(calls)
@@ -2780,6 +2915,15 @@ async def voice_stream(file: UploadFile = File(...), face: bool = False,
     # Asleep is asleep. The microphone keeps running, but nothing gets answered
     # until Lancer is woken by name -- otherwise "go to sleep" leaves a folded,
     # motorless robot still replying to every conversation in the room.
+    if is_ringing() and heard:
+        stop_ringing("someone spoke")
+        if _STOP_ALARM_RE.search(heard):
+            # "okay, stop" needs no answer beyond the silence it asked for.
+            logger.info("[stream] alarm acknowledged: %r", heard)
+            stage(trace, "alarm stopped", clock, heard=heard)
+            _traces.appendleft(trace)
+            raise HTTPException(status_code=204, detail="alarm acknowledged")
+
     if is_asleep():
         if not looks_like_wake(heard):
             logger.info("[stream] asleep, ignoring: %r", heard)

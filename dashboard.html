@@ -173,6 +173,8 @@
             <button onclick="quickSkill('rest',{action:'wake'},'waking')">Wake up</button>
             <button onclick="quickSkill('rest',{action:'sleep'},'sleeping')">Go to sleep</button>
             <button onclick="quickSkill('look',{question:'what do you see'},'looking')">What do you see</button>
+            <button class="danger" id="stopAlarm" style="display:none"
+                    onclick="stopAlarm()">Stop alarm</button>
           </div>
         </div>
 
@@ -671,6 +673,12 @@ async function playCue(kind){
   quickOut(r.__error ? ('failed: '+r.__error) : ('played '+kind));
 }
 
+async function stopAlarm(){
+  const r = await F('/api/alarm/stop', {method:'POST'});
+  quickOut(r.was_ringing ? 'alarm stopped' : 'nothing was ringing');
+  status();
+}
+
 async function quickTimer(){
   const el = document.getElementById('timerFor');
   const duration = el.value.trim() || '5 minutes';
@@ -794,12 +802,15 @@ async function status(){
   // Asleep and standby look the same from across the room; they are not the
   // same thing. Standby is upright and tracking and simply waiting to be
   // named; asleep is folded down with the motors off.
+  const sa = document.getElementById('stopAlarm');
+  if(sa) sa.style.display = cs.ringing ? '' : 'none';
   const posture = cs.posture ? (cs.posture === 'listening'
     ? `listening ${Math.round((cs.listening_ms||0)/1000)}s`
     : cs.posture) : null;
   document.getElementById('pills').innerHTML = `
     <span class="pill"><span class="dot ${s.online?'on':''}"></span>robot ${s.online?'online':'offline'}</span>
     <span class="pill">app <b>${s.app_state||'stopped'}</b></span>
+    ${cs.ringing?'<span class="pill" style="color:var(--accent)">&#9200; ringing</span>':''}
     ${posture?`<span class="pill"><span class="dot ${cs.asleep?'':'on'}"></span>${esc(posture)}</span>`:''}
     <span class="pill">motors <b>${(s.motors||'—').toString().replace('MotorControlMode.','')}</b></span>
     <span class="pill">loop <b>${s.control_hz||0} Hz</b></span>

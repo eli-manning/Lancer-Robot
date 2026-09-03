@@ -57,7 +57,8 @@ SERVER_URL = f"http://127.0.0.1:{SERVER_PORT}"
 # the server is stopped.
 PROXIED = {
     "GET": ["/api/traces", "/api/voices", "/api/stats", "/state"],
-    "POST": ["/api/retrieve", "/api/ask", "/api/say", "/api/cue"],
+    "POST": ["/api/retrieve", "/api/ask", "/api/say", "/api/cue",
+             "/api/alarm/stop"],
 }
 
 
