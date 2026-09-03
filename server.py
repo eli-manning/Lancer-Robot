@@ -235,11 +235,14 @@ def _length_rule() -> str:
 # description of the thing, and takes longer than the nod.
 ACTION_RULE = (
     "Gestures happen while you are talking, not before, so use them freely "
-    "alongside what you say. "
-    "When you have already answered by doing something -- a nod, a gesture, "
-    "turning your own volume down, setting a timer -- a few words is plenty, "
-    "and saying nothing at all is fine. Do not narrate what you just did, and "
-    "never describe a gesture in words as well as making it."
+    "alongside what you say. Move by calling the gesture tool, never by "
+    "writing the action down: no stage directions, no asterisks, nothing like "
+    "\"(Lancer laughs)\" -- every word you write is read out loud, so that "
+    "one comes out as him saying the words \"Lancer laughs\". "
+    "When the request was only to do something -- nod, wave, turn your volume "
+    "down -- a few words is plenty and saying nothing at all is fine. But if "
+    "they also asked you something, answer it: doing the gesture does not "
+    "excuse you from the question. Never narrate what you just did."
 )
 
 
@@ -1512,6 +1515,7 @@ MAX_SENTENCES = 3
 def sanitize_for_speech(text: str, max_sentences: int | None = None) -> str:
     """Strip markdown and clamp to a few sentences so the answer reads aloud well."""
     max_sentences = max_sentences or int(rt.get("max_sentences"))
+    text = strip_stage_directions(text)
     text = _re.sub(r"[*_`#]+", "", text)
     text = _re.sub(r"^\s*\d+[.)]\s*", "", text, flags=_re.M)
     text = _re.sub(r"^\s*[-+\u2022]\s*", "", text, flags=_re.M)
@@ -1557,8 +1561,62 @@ def split_sentences(text: str) -> list[str]:
     return out
 
 
+# Stage directions. Models write them constantly for a character that speaks --
+# "(Lancer laughs.)", "*sighs*", "(snore)" -- and text-to-speech reads them out,
+# so the robot narrates its own behaviour in the third person.
+#
+# Parentheses cannot simply be stripped: the corpus is full of "(Mathematical
+# Statistics I)" and "(GE-BTC)", which are part of the answer. So the test is
+# what is inside them.
+_STAGE_VERBS = (
+    r"laugh|chuckle|giggle|snicker|cackle|grin|smile|smirk|sigh|gasp|groan|"
+    r"nod|shake|tilt|blink|wink|wave|dance|spin|twirl|whir|hum|buzz|beep|boop|"
+    r"click|snore|yawn|pause|shrug|bow|wiggle|stare|glance|lean|perk|droop|"
+    r"chirp|ahem|coughs?|clears? (?:his |its |her |their )?throat|"
+    r"looks? (?:up|down|away|around)|raises? (?:an )?(?:eyebrow|antenna)"
+)
+_STAGE_INSIDE = _re.compile(
+    r"^\W*(?:lancer|he|it|the robot)?\s*(?:" + _STAGE_VERBS + r")\w*\b",
+    _re.I)
+
+
+def _is_stage_direction(inner: str) -> bool:
+    """Whether the text inside a bracket describes an action rather than words."""
+    inner = inner.strip()
+    if not inner:
+        return True
+    # "Lancer does a little dance." -- named, so it is about him, not content.
+    if _re.match(r"^\W*lancer\b", inner, _re.I):
+        return True
+    return bool(_STAGE_INSIDE.match(inner))
+
+
+def strip_stage_directions(text: str) -> str:
+    """
+    Remove narrated actions, keep real parentheticals.
+
+    Asterisk spans go first and whole: stripping the asterisks as markdown
+    turned "*laughs*" into the spoken word "laughs", which is worse than
+    leaving it alone.
+    """
+    def drop(match) -> str:
+        inner = match.group(1)
+        return "" if _is_stage_direction(inner) else match.group(0)
+
+    text = _re.sub(r"\*([^*\n]{1,60})\*", drop, text)
+    text = _re.sub(r"\(([^)\n]{1,60})\)", drop, text)
+    text = _re.sub(r"\[([^\]\n]{1,60})\]", drop, text)
+    # Tidy the punctuation the removal leaves behind. The duplicate collapse
+    # goes first and requires whitespace between the marks, so it catches
+    # "done. . next" without touching an ellipsis somebody meant to write.
+    text = _re.sub(r"([.!?])(?:\s+\1)+", r"\1", text)
+    text = _re.sub(r"\s+([,.!?;:])", r"\1", text)
+    return _re.sub(r"\s{2,}", " ", text).strip()
+
+
 def _clean_for_speech(text: str) -> str:
     """Strip markdown from one sentence without clamping the sentence count."""
+    text = strip_stage_directions(text)
     text = _re.sub(r"[*_`#]+", "", text)
     text = _re.sub(r"^\s*\d+[.)]\s*", "", text, flags=_re.M)
     text = _re.sub(r"^\s*[-+•]\s*", "", text, flags=_re.M)
@@ -2062,6 +2120,8 @@ async def _timer_watch() -> None:
 # than trusting what it last remembered.
 _RECONCILE_EVERY = 5.0
 _last_reconcile = {"at": 0.0}
+# A wake is in flight until this time; the motors are on their way up.
+_waking = {"until": 0.0}
 
 
 def _reconcile_sleep() -> None:
@@ -2074,6 +2134,8 @@ def _reconcile_sleep() -> None:
     questions perfectly well from a folded position and nothing would stand him
     up, because as far as the server knew he was already standing.
     """
+    if time.monotonic() < _waking["until"]:
+        return
     if time.monotonic() - _last_reconcile["at"] < _RECONCILE_EVERY:
         return
     _last_reconcile["at"] = time.monotonic()
@@ -2140,6 +2202,9 @@ async def _idle_sleep_watch() -> None:
 def wake_robot() -> None:
     """Bring the robot back up and start answering again."""
     _sleep_state["asleep"] = False
+    # The motors take a moment to come up. Without this the reconciler sees
+    # them still down, decides he is asleep, and undoes the wake mid-turn.
+    _waking["until"] = time.monotonic() + 8.0
     # He has not spoken yet this conversation; the watcher re-arms when he does.
     _attention["armed"] = False
     logger.info("Waking up")
@@ -2715,11 +2780,20 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True,
                 note_sleep_change(calls)
                 clock = stage(trace, "skills", clock,
                               called=[c["skill"] for c in calls])
-                if is_asleep():
+                went_to_sleep = any(
+                    call.get("skill") == "rest"
+                    and (call.get("result") or {}).get("state") == "asleep"
+                    for call in calls)
+                if went_to_sleep:
                     # Going to sleep is the answer. A parting line means the
                     # speaker is still playing while the body folds down, the
                     # microphone hears it, and the last thing he does before
                     # going quiet is talk over himself.
+                    #
+                    # Keyed to the rest call, not to is_asleep(): once sleep
+                    # state was reconciled from the motors, "is he asleep" was
+                    # true for any turn taken while folded, so every skill turn
+                    # in that state returned an empty answer.
                     _attention["busy_since"] = 0.0
                     trace["route"] = "sleep"
                     trace["answer"] = ""

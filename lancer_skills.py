@@ -288,7 +288,13 @@ def gather(
             # model repeat itself.
             return working, calls
 
-        working.append(message)
+        # Keep the tool-call turn, drop any prose it came with. Models often
+        # write the answer in the same breath as calling a tool; left in the
+        # history it counts as already said, so the final generation either
+        # continues mid-thought or produces nothing at all. Asked for a joke
+        # and a laugh, he called the laugh, kept the joke here, and then spoke
+        # an empty answer.
+        working.append({**message, "content": ""})
         for call in tool_calls:
             function = call.get("function", {})
             name = function.get("name", "")
