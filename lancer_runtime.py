@@ -41,6 +41,16 @@ DEFAULTS: dict[str, Any] = {
     "rerank_enabled": True,
     "verify_grounding": True,
     "relevance_min": -6.0,
+    # How Lancer decides an utterance was meant for him.
+    #   ambient   -- the heuristics: wake word, or a face plus something
+    #                question-shaped. Right for a robot on a desk in a room
+    #                where people are also talking to each other.
+    #   wake_word -- his name every time, like a smart speaker, except in the
+    #                short window right after he finishes talking, when a reply
+    #                is obviously still aimed at him.
+    "addressing_mode": "ambient",
+    # Seconds after he stops speaking during which a follow-up needs no name.
+    "followup_window": 10.0,
     # skills, memory and streaming
     # "native" runs the pipeline in server.py. "zeroclaw" hands the
     # conversation to the gateway over its WebSocket. The rollback from one to
@@ -162,6 +172,7 @@ LIMITS: dict[str, tuple[float, float]] = {
     "skill_timeout": (2, 60),
     "robot_port": (1, 65535),
     "resume_grace": (0.0, 60.0),
+    "followup_window": (0.0, 120.0),
     "thinking_sound_volume": (0.0, 0.5),   # louder trips the barge-in gate
     "doa_deadband": (0.05, 1.5),
     "doa_yaw_sign": (-1.0, 1.0),

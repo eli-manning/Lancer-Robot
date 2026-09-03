@@ -419,17 +419,29 @@ _CHATTER_OPENERS = (
 
 
 def is_addressed(text: str, face_present: bool,
-                 interrupted: bool = False) -> tuple[bool, str]:
+                 interrupted: bool = False, mode: str = "ambient",
+                 attentive: bool = False) -> tuple[bool, str]:
     """
     Decide whether an utterance was meant for Lancer.
 
-    Returns (addressed, reason). A wake word always counts. Otherwise we need
-    someone actually looking at the robot AND something question-shaped -- an
-    overheard "sure, dude" satisfies neither.
+    Returns (addressed, reason). A wake word always counts. In ambient mode we
+    otherwise need someone actually looking at the robot AND something
+    question-shaped -- an overheard "sure, dude" satisfies neither.
+
+    In wake_word mode nothing else counts at all, the way a smart speaker
+    behaves: his name every time. The exception is the window just after he
+    finishes talking, because requiring the name to answer his own question is
+    the thing that makes smart speakers exhausting. `attentive` is that window,
+    decided by the caller from the clock.
     """
     lowered = text.strip().lower()
     if any(w in lowered for w in WAKE_WORDS):
         return True, "wake-word"
+
+    if mode == "wake_word":
+        if attentive or interrupted:
+            return True, "follow-up window"
+        return False, "standby -- needs his name"
 
     words = lowered.split()
     first = words[0].strip(",.!?") if words else ""
@@ -1495,7 +1507,9 @@ async def voice(file: UploadFile = File(...), face: bool = False):
     if heard != raw_heard:
         logger.info("[voice] normalized %r -> %r", raw_heard, heard)
 
-    addressed, reason = is_addressed(heard, face)
+    addressed, reason = is_addressed(
+        heard, face, mode=str(rt.get("addressing_mode") or "ambient"),
+        attentive=attentive())
     if not addressed:
         logger.info("[voice] ignoring (%s): %r", reason, heard)
         raise HTTPException(status_code=204, detail=f"not addressed: {reason}")
@@ -1574,6 +1588,15 @@ _WAKE_RE = _re.compile(
     r"\b(lancer|reachy|wake up|wake|get up|rise and shine|good morning)\b",
     _re.I,
 )
+
+
+# Until when a reply needs no wake word. Monotonic seconds; 0 means standby.
+_attention = {"until": 0.0}
+
+
+def attentive() -> bool:
+    """Whether we are still inside the window after Lancer stopped speaking."""
+    return time.monotonic() < _attention["until"]
 
 
 def is_asleep() -> bool:
@@ -1937,11 +1960,21 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True,
     spoken: list[str] = []
     index = 0
 
+    # Playback timing, for the follow-up window. The robot starts playing the
+    # first sentence while later ones are still being generated, so "when he
+    # stops talking" is when the first frame landed plus the total audio, not
+    # when generation finished -- those differ by seconds on a long answer.
+    speech = {"started": None, "seconds": 0.0}
+
     async def sentence_frame(text: str, idx: int, last: bool = False) -> dict:
         frame = {"type": "sentence", "index": idx, "text": text, "last": last}
         if speak:
             audio = await asyncio.to_thread(synthesize, text)
             frame["audio_b64"] = base64.b64encode(audio).decode()
+            if speech["started"] is None:
+                speech["started"] = time.monotonic()
+            # 16 kHz mono 16-bit WAV, less the 44-byte header.
+            speech["seconds"] += max(0.0, (len(audio) - 44) / (16000 * 2))
         return frame
 
     # Social replies, refusals and continuations are already written.
@@ -2153,10 +2186,22 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True,
     # asleep. Inferring it from motor power does not work: power stays on for
     # the whole fold-down and is only cut at the end, which is exactly the
     # window in which the shaking happens.
+    # Open the follow-up window from the moment playback ends -- but only when
+    # he actually spoke out loud. A turn typed into the dashboard must not make
+    # the robot start accepting unnamed speech in the room; the window exists
+    # because he just talked *to you*, not because the server did work.
+    now = time.monotonic()
+    if speak and answer:
+        playback_end = max(now, (speech["started"] or now) + speech["seconds"])
+        _attention["until"] = (playback_end
+                               + float(cfg.get("followup_window") or 0.0))
+
     yield {"type": "done", "heard": heard, "asleep": is_asleep(),
            "answer": answer, "sources": sources,
            "unknown": unknown, "latency_ms": latency,
            "skills": [c["skill"] for c in calls],
+           "listening_until_ms": max(
+               0, int((_attention["until"] - now) * 1000)),
            "more_available": bool(_remainder["text"])}
 
 
@@ -2262,7 +2307,10 @@ async def voice_stream(file: UploadFile = File(...), face: bool = False,
         wake_robot()
         clock = stage(trace, "woken", clock, heard=heard)
 
-    addressed, reason = is_addressed(heard, face, interrupted=interrupted)
+    addressed, reason = is_addressed(
+        heard, face, interrupted=interrupted,
+        mode=str(rt.get("addressing_mode") or "ambient"),
+        attentive=attentive())
     trace["addressed"] = addressed
     trace["addressed_reason"] = reason
     trace["interrupted"] = interrupted

@@ -250,7 +250,8 @@ const GROUPS = {
   "Generation":["llm_model","temperature","max_sentences","history_turns"],
   "Retrieval":["top_k","dense_k","lexical_k","fuse_k","rerank_enabled",
     "verify_grounding","relevance_min"],
-  "Conversation":["conversation_backend","skills_enabled","skill_timeout",
+  "Conversation":["addressing_mode","followup_window","conversation_backend",
+    "skills_enabled","skill_timeout",
     "memory_enabled","auto_react","stream_enabled","resume_after_false_barge",
     "resume_grace","thinking_sound","thinking_sound_volume"],
   "Speech":["tts_voice","tts_speed","whisper_model"],
@@ -274,6 +275,8 @@ const HELP = {
   relevance_min:"Rerank score below which Lancer says it does not know. Less negative is stricter.",
   rerank_enabled:"Cross-encoder pass over the fused candidates. Off is faster and noticeably worse.",
   verify_grounding:"Check each sentence against the retrieved text before speaking it.",
+  addressing_mode:"ambient uses the heuristics: wake word, or a face plus a question. wake_word is smart-speaker behaviour — his name every time.",
+  followup_window:"Seconds after he stops speaking when a reply needs no name. Only used in wake_word mode.",
   conversation_backend:"native runs the pipeline here. zeroclaw hands off to the gateway.",
   skill_timeout:"Seconds a skill may run before it is abandoned and the answer goes on without it.",
   resume_after_false_barge:"Finish a sentence that was cut off by a noise rather than a person.",
@@ -308,9 +311,11 @@ function field(k,v){
     return `<div class="fld"><label>${label}</label><div class="chk">
       <input type="checkbox" id="${id}" ${v?'checked':''} onchange="markDirty()">
       </div>${note}</div>`;
-  if(k==='llm_model'||k==='tts_voice'||k==='whisper_model'||k==='conversation_backend'){
+  if(k==='llm_model'||k==='tts_voice'||k==='whisper_model'
+     ||k==='conversation_backend'||k==='addressing_mode'){
     const opts = k==='llm_model'?MODELS : k==='tts_voice'?VOICES
       : k==='conversation_backend'?['native','zeroclaw']
+      : k==='addressing_mode'?['ambient','wake_word']
       : ['tiny.en','base.en','small.en','medium.en'];
     const list = opts.length?opts:[v];
     return `<div class="fld"><label>${label}</label>
