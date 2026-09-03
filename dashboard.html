@@ -175,6 +175,12 @@
           the network down. Hosted is faster and smarter, and sends the conversation
           off the robot. Keys are written to <code>lancer_secrets.json</code>, which is
           untracked and never read back into this page.</div>
+        <div class="note" style="margin-top:6px"><b>Skills by rule only</b> is a
+          limit of this app, not of the provider. The tool loop calls Ollama
+          directly, so a hosted model is never offered the skill schemas and
+          cannot decide to call one. Rule-driven skills — weather, the date,
+          document lookup — still run on every provider, because those are
+          chosen here and injected as context before the model sees anything.</div>
       </div>
     </section>
 
@@ -442,7 +448,7 @@ async function loadProviders(){
     return `<div class="fld" style="border-left:3px solid ${on?'var(--ok,#3fb950)':'transparent'};padding-left:10px">
       <label>${esc(p.provider)}${on?' — in use':''}
         ${p.needs_key?(p.key_set?' · key set':' · no key'):' · local'}
-        ${p.supports_tool_calls?'':' · no tool calls'}</label>
+        · ${p.supports_tool_calls?'picks its own skills':'skills by rule only'}</label>
       <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
         <select id="m_${p.provider}">${models}</select>
         ${p.needs_key?`<input type="password" id="k_${p.provider}"

@@ -99,7 +99,12 @@ def status() -> list[dict]:
             "configured": configured(name),
             "needs_key": name != OLLAMA,
             "key_set": bool(api_key(name)) if name != OLLAMA else True,
-            "supports_tool_calls": name in (OLLAMA, ANTHROPIC),
+            # Model-chosen tool calls, not "does this vendor's API support
+            # them". Both tool loops in lancer_skills call ollama.chat
+            # directly, so a hosted model never gets offered the schemas --
+            # Gemini and Anthropic alike. Claiming otherwise here sent people
+            # looking for a Gemini limitation that is ours.
+            "supports_tool_calls": name == OLLAMA,
             "models": SUGGESTED_MODELS[name],
         }
         for name in PROVIDERS
