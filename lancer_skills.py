@@ -196,6 +196,7 @@ def gather(
     allow: list[str] | None = None,
     approve: bool = False,
     on_call=None,
+    provider: str | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """
     Run only the tool phase, and hand back the messages the answer builds on.
@@ -209,10 +210,20 @@ def gather(
     Returns (messages, calls). When the model asks for no tools, messages comes
     back unchanged and the caller streams exactly as it would have anyway.
     """
-    import ollama
+    import lancer_llm as llm
 
     schemas = tool_schemas(allow)
     if not schemas:
+        return list(messages), []
+
+    if provider is None:
+        import lancer_runtime as rt
+
+        provider = str(rt.get("llm_provider") or llm.OLLAMA)
+    # Sending schemas to a provider that cannot act on them costs a round trip
+    # and returns nothing, so skip straight to the answer. The rule-driven
+    # skills the caller already ran are unaffected.
+    if not llm.supports_tool_calls(provider):
         return list(messages), []
 
     calls: list[dict] = []
@@ -220,17 +231,14 @@ def gather(
 
     for _ in range(MAX_TOOL_ITERATIONS):
         try:
-            response = ollama.chat(
-                model=model, messages=working, tools=schemas,
-                options=options or {},
-            )
+            message = llm.chat_with_tools(working, model, provider, schemas,
+                                          options or {})
         except Exception as e:
             # A model without tool support, or a malformed call it could not
             # recover from. Answering without live data beats failing the turn.
             logger.warning("Tool phase failed (%s); continuing without skills", e)
             return list(messages), calls
 
-        message = response["message"]
         tool_calls = message.get("tool_calls") or []
         if not tool_calls:
             # It answered instead of calling. Drop that draft: the caller is

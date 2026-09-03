@@ -104,7 +104,7 @@ def status() -> list[dict]:
             # directly, so a hosted model never gets offered the schemas --
             # Gemini and Anthropic alike. Claiming otherwise here sent people
             # looking for a Gemini limitation that is ours.
-            "supports_tool_calls": name == OLLAMA,
+            "supports_tool_calls": supports_tool_calls(name),
             "models": SUGGESTED_MODELS[name],
         }
         for name in PROVIDERS
@@ -159,6 +159,187 @@ def _alternating(messages: list[dict]) -> list[dict]:
     while out and out[0]["role"] == "assistant":
         out.pop(0)
     return out
+
+
+# --- Gemini's conversation shape -----------------------------------------
+# Gemini does not speak the OpenAI tool protocol the rest of this app uses, so
+# the whole conversation is converted on every request: a tool call is a
+# functionCall part on a "model" turn, and its result is a functionResponse part
+# on a "user" turn. Getting this wrong does not error -- the model simply
+# behaves as though it never called anything -- so it is one function with the
+# mapping written down.
+
+# Keys Gemini accepts in a parameter schema. Anything else (additionalProperties,
+# $schema, default) is rejected outright, and our manifests are free to grow
+# them, so the schema is filtered rather than trusted.
+_SCHEMA_KEYS = {"type", "description", "enum", "properties", "required",
+                "items", "nullable", "format"}
+
+
+def _clean_schema(schema: dict) -> dict:
+    out = {}
+    for key, value in (schema or {}).items():
+        if key not in _SCHEMA_KEYS:
+            continue
+        if key == "properties" and isinstance(value, dict):
+            out[key] = {k: _clean_schema(v) for k, v in value.items()}
+        elif key == "items" and isinstance(value, dict):
+            out[key] = _clean_schema(value)
+        else:
+            out[key] = value
+    return out
+
+
+def _gemini_tools(schemas: list[dict]) -> list[dict]:
+    """OpenAI-style function schemas as Gemini functionDeclarations."""
+    declarations = []
+    for schema in schemas or []:
+        function = schema.get("function", schema)
+        name = function.get("name")
+        if not name:
+            continue
+        declaration = {"name": name,
+                       "description": function.get("description", "")}
+        parameters = _clean_schema(function.get("parameters") or {})
+        # A declaration with an empty parameter object is rejected; a skill that
+        # takes no arguments simply has no parameters field.
+        if parameters.get("properties"):
+            declaration["parameters"] = parameters
+        declarations.append(declaration)
+    return [{"functionDeclarations": declarations}] if declarations else []
+
+
+def _gemini_contents(messages: list[dict]) -> tuple[str, list[dict]]:
+    """Convert our message list into (systemInstruction, contents)."""
+    system_parts: list[str] = []
+    contents: list[dict] = []
+
+    def add(role: str, part: dict) -> None:
+        # Consecutive turns of the same role are merged rather than sent
+        # separately: a model turn that calls two skills is one turn with two
+        # parts, and the paired results have to line up with it.
+        if contents and contents[-1]["role"] == role:
+            contents[-1]["parts"].append(part)
+        else:
+            contents.append({"role": role, "parts": [part]})
+
+    for message in messages:
+        role = message.get("role")
+        content = message.get("content") or ""
+        if role == "system":
+            if content:
+                system_parts.append(str(content))
+            continue
+        if role == "tool":
+            body = content
+            if isinstance(body, str):
+                try:
+                    body = json.loads(body)
+                except json.JSONDecodeError:
+                    body = {"result": body}
+            if not isinstance(body, dict):
+                body = {"result": body}
+            add("user", {"functionResponse": {
+                "name": message.get("name") or "tool", "response": body}})
+            continue
+        if role == "assistant":
+            calls = message.get("tool_calls") or []
+            for call in calls:
+                function = call.get("function", {}) if isinstance(call, dict) else {}
+                arguments = function.get("arguments") or {}
+                if isinstance(arguments, str):
+                    try:
+                        arguments = json.loads(arguments)
+                    except json.JSONDecodeError:
+                        arguments = {}
+                add("model", {"functionCall": {"name": function.get("name", ""),
+                                               "args": arguments}})
+            if content:
+                add("model", {"text": str(content)})
+            continue
+        if content:
+            add("user", {"text": str(content)})
+
+    # A conversation may not open on a model turn.
+    while contents and contents[0]["role"] == "model":
+        contents.pop(0)
+    return "\n\n".join(system_parts), contents
+
+
+def _gemini_body(messages: list[dict], options: dict,
+                 tools: list[dict] | None = None) -> dict:
+    system, contents = _gemini_contents(messages)
+    body: dict = {
+        "contents": contents,
+        "generationConfig": {
+            "maxOutputTokens": MAX_OUTPUT_TOKENS,
+            "temperature": float(options.get("temperature", 0.4)),
+        },
+    }
+    if system:
+        body["systemInstruction"] = {"parts": [{"text": system}]}
+    declarations = _gemini_tools(tools or [])
+    if declarations:
+        body["tools"] = declarations
+    return body
+
+
+def _gemini_url(model: str, method: str) -> str:
+    name = model or SUGGESTED_MODELS[GEMINI][0]
+    return (f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{name}:{method}")
+
+
+# --- Tool calling --------------------------------------------------------
+
+def chat_with_tools(messages: list[dict], model: str, provider: str,
+                    tools: list[dict], options: dict | None = None) -> dict:
+    """
+    One non-streaming turn in which the model may call skills.
+
+    Returns a message in the shape the rest of the app already uses -- Ollama's
+    -- whoever produced it: {"role", "content", "tool_calls": [{"function":
+    {"name", "arguments"}}]}. The tool loop then does not care who answered.
+    """
+    options = options or {}
+    if provider == GEMINI:
+        return _gemini_chat(messages, model, tools, options)
+    import ollama
+
+    response = ollama.chat(model=model, messages=messages,
+                           tools=tools or None, options=options)
+    return response["message"]
+
+
+def supports_tool_calls(provider: str) -> bool:
+    """Providers that can be handed skill schemas and choose among them."""
+    return provider in (OLLAMA, GEMINI)
+
+
+def _gemini_chat(messages: list[dict], model: str, tools: list[dict],
+                 options: dict) -> dict:
+    import requests
+
+    key = api_key(GEMINI)
+    if not key:
+        raise RuntimeError("no Gemini API key configured")
+
+    response = requests.post(
+        _gemini_url(model, "generateContent"),
+        json=_gemini_body(messages, options, tools), timeout=60,
+        headers={"x-goog-api-key": key})
+    if not response.ok:
+        raise RuntimeError(
+            f"Gemini returned {response.status_code}: {response.text[:300]}")
+
+    candidates = response.json().get("candidates") or []
+    parts = (candidates[0].get("content", {}).get("parts", [])
+             if candidates else [])
+    text = "".join(p["text"] for p in parts if p.get("text"))
+    calls = [{"function": {"name": p["functionCall"].get("name", ""),
+                           "arguments": p["functionCall"].get("args") or {}}}
+             for p in parts if p.get("functionCall")]
+    return {"role": "assistant", "content": text, "tool_calls": calls}
 
 
 # --- Streaming -----------------------------------------------------------
@@ -241,26 +422,11 @@ def _stream_gemini(messages: list[dict], model: str,
     if not key:
         raise RuntimeError("no Gemini API key configured")
 
-    system, rest = _split_system(messages)
-    contents = [
-        {"role": "model" if m["role"] == "assistant" else "user",
-         "parts": [{"text": m["content"]}]}
-        for m in _alternating(rest)
-    ]
-
-    body: dict = {
-        "contents": contents,
-        "generationConfig": {
-            "maxOutputTokens": MAX_OUTPUT_TOKENS,
-            "temperature": float(options.get("temperature", 0.4)),
-        },
-    }
-    if system:
-        body["systemInstruction"] = {"parts": [{"text": system}]}
-
-    name = model or SUGGESTED_MODELS[GEMINI][0]
-    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-           f"{name}:streamGenerateContent?alt=sse")
+    # The same conversion the tool phase uses, so a conversation that already
+    # contains tool calls and their results streams with those intact rather
+    # than flattened into prose.
+    body = _gemini_body(messages, options)
+    url = _gemini_url(model, "streamGenerateContent") + "?alt=sse"
 
     with requests.post(url, json=body, timeout=120, stream=True,
                        headers={"x-goog-api-key": key}) as response:

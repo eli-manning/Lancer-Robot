@@ -175,12 +175,12 @@
           the network down. Hosted is faster and smarter, and sends the conversation
           off the robot. Keys are written to <code>lancer_secrets.json</code>, which is
           untracked and never read back into this page.</div>
-        <div class="note" style="margin-top:6px"><b>Skills by rule only</b> is a
-          limit of this app, not of the provider. The tool loop calls Ollama
-          directly, so a hosted model is never offered the skill schemas and
-          cannot decide to call one. Rule-driven skills — weather, the date,
-          document lookup — still run on every provider, because those are
-          chosen here and injected as context before the model sees anything.</div>
+        <div class="note" style="margin-top:6px">Local and Gemini are offered the
+          skill schemas and can decide to call one mid-answer. Anthropic is
+          <b>skills by rule only</b> — a limit of this app, not of the provider:
+          its tool protocol is not wired up yet. Rule-driven skills — weather,
+          the date, document lookup — run on every provider regardless, because
+          those are chosen here and injected before the model sees anything.</div>
       </div>
     </section>
 
