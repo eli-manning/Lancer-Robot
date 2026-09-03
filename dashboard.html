@@ -322,7 +322,8 @@ function toast(m){const t=document.getElementById('toast');t.textContent=m;
 // a group below lands in "Other" rather than being silently unreachable, which
 // is how doa_yaw_sign and the body-assist gains ended up editable only over ssh.
 const GROUPS = {
-  "Generation":["llm_model","temperature","max_sentences","history_turns"],
+  "Generation":["llm_model","tool_model","temperature","max_sentences",
+    "history_turns"],
   "Retrieval":["top_k","dense_k","lexical_k","fuse_k","rerank_enabled",
     "verify_grounding","relevance_min"],
   "Conversation":["addressing_mode","followup_window","conversation_backend",
@@ -344,6 +345,7 @@ const GROUPS = {
 const ELSEWHERE = ["llm_provider","robot_hosts","robot_port"];
 
 const HELP = {
+  tool_model:"Model that picks which skill to call. Blank uses llm model. A smaller one is faster and sits in front of every answer.",
   temperature:"Higher wanders, lower repeats. 0.15 is right for answers from documents.",
   max_sentences:"Hard cap on the spoken answer. Anything past it is discarded, not shortened.",
   history_turns:"Messages kept, not exchanges. 12 is six turns of back-and-forth.",

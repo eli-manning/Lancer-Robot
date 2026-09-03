@@ -1371,6 +1371,21 @@ def transcribe(wav_path: str) -> str:
     return " ".join(seg.text for seg in segments).strip()
 
 
+DEFAULT_VOICE = "bm_george"
+_voice_cache: set[str] = set()
+
+
+def _available_voices() -> set[str]:
+    global _voice_cache
+    if not _voice_cache:
+        try:
+            _voice_cache = set(_get_kokoro().get_voices())
+        except Exception as e:
+            logger.warning("Could not list voices: %s", e)
+            return {DEFAULT_VOICE}
+    return _voice_cache
+
+
 def synthesize(text: str) -> bytes:
     """Render text to 16kHz mono 16-bit WAV bytes using the Kokoro voice."""
     import wave
@@ -1382,8 +1397,17 @@ def synthesize(text: str) -> bytes:
     # Kokoro rejects anything outside 0.5-2.0, and an out-of-range value here
     # takes out every spoken reply, so clamp rather than trust the config.
     speed = min(max(float(cfg.get("tts_speed") or 1.0), 0.5), 2.0)
+    # A voice name that is not installed raises inside Kokoro, which takes out
+    # every spoken reply -- the robot goes completely mute and the only symptom
+    # is an error frame. A wrong voice should sound wrong, not sound like
+    # nothing. bm_serena was configured and does not exist.
+    voice = cfg.get("tts_voice") or DEFAULT_VOICE
+    if voice not in _available_voices():
+        logger.warning("Voice %r is not installed; falling back to %s",
+                       voice, DEFAULT_VOICE)
+        voice = DEFAULT_VOICE
     samples, rate = _get_kokoro().create(
-        text, voice=cfg["tts_voice"], speed=speed, lang="en-us"
+        text, voice=voice, speed=speed, lang="en-us"
     )
     samples = np.asarray(samples, dtype=np.float32)
 
@@ -1911,12 +1935,51 @@ _PREFETCH: list[tuple[object, str, dict]] = [
                  r"|\bhot\s+(out|outside|today)\b|\bcold\s+(out|outside|today)\b"
                  r"|\bjacket\b|\bumbrella\b|\bsunny\b", _re.I),
      "weather", {}),
+    # Anything about the room as a whole. A single forward frame covers maybe a
+    # third of a room, so these get the head sweep -- and they are prefetched
+    # rather than left to the model because the failure mode is not silence, it
+    # is a confident wrong number. Asked how many people were in the room, he
+    # answered "two of you" with the camera untouched; the sweep found three.
+    (_re.compile(r"\bhow many (people|of us|others|persons)\b"
+                 # A short bridge rather than a fixed word order: people say
+                 # "who is in the room", "who else is in here", "who's all in
+                 # this room", and enumerating those orderings never ends.
+                 r"|\b(who|what|anyone|anybody)\b[\w\s']{0,16}?"
+                 r"\b(in|around|behind|near|beside)\s+"
+                 r"(the\s+|this\s+|your\s+)?(room|here|you|us)\b"
+                 r"|\bwhat'?s\s+(around|behind)\s+you\b"
+                 r"|\blook around\b|\bsurvey\b"
+                 r"|\bdescribe (the|this) (room|place|space)\b"
+                 r"|\bis (anyone|anybody) (else )?(here|there|around)\b", _re.I),
+     "look", {"survey": True}),
+    # Straight ahead is enough for these, and a sweep would be six seconds of
+    # head-turning before answering "a blue mug".
+    (_re.compile(r"\bwhat do you see\b|\bcan you see\b|\bwhat am i (holding|wearing)\b"
+                 r"|\bwhat does (this|my|that) \w+ say\b"
+                 r"|\blook at (this|me|that)\b|\bread (this|that|my)\b", _re.I),
+     "look", {}),
 ]
 
 
 def prefetch_for(query: str) -> list[str]:
     """Skills whose answer this question definitely needs, whatever the model thinks."""
-    return [name for pattern, name, _ in _PREFETCH if pattern.search(query)]
+    return [name for name, _ in prefetch_plan(query)]
+
+
+def prefetch_plan(query: str) -> list[tuple[str, dict]]:
+    """
+    The same rules, with the arguments each one implies.
+
+    The arguments were always in the table and were being thrown away, so every
+    prefetched skill ran with no arguments -- which for the camera meant a rule
+    that fired specifically because the question was about the whole room still
+    took a single forward glance.
+    """
+    chosen: list[tuple[str, dict]] = []
+    for pattern, name, arguments in _PREFETCH:
+        if pattern.search(query) and not any(n == name for n, _ in chosen):
+            chosen.append((name, dict(arguments)))
+    return chosen
 
 
 SKILL_HINT = (
@@ -2277,11 +2340,16 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True,
         if cfg.get("skills_enabled", True) and allowed:
             # Certain questions get their source fetched outright, before the
             # model is consulted about it.
-            required = [n for n in prefetch_for(heard) if n in allowed]
+            plan_skills = [(n, a) for n, a in prefetch_plan(heard) if n in allowed]
+            required = [n for n, _ in plan_skills]
             prefetched: list[dict] = []
-            for name in required:
-                result = await asyncio.to_thread(skills.run_skill, name, {})
-                prefetched.append({"skill": name, "arguments": {},
+            for name, arguments in plan_skills:
+                yield {"type": "status", "state": "skill", "skill": name,
+                       "say": getattr(skills.load_skills().get(name),
+                                      "spoken_wait", None), "ok": True}
+                result = await asyncio.to_thread(skills.run_skill, name,
+                                                 arguments)
+                prefetched.append({"skill": name, "arguments": arguments,
                                    "result": result})
                 messages = [*messages[:-1], {
                     "role": "system",
@@ -2297,15 +2365,23 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True,
             # date rule on "right now", so the camera was never reached and he
             # described a room he had not looked at. Whatever the rules
             # prefetched is already in context, so this is an addition to it.
+            offer = [n for n in allowed if n not in required]
+            logger.debug("[skills] prefetched=%s offering=%s", required, offer)
             extra, calls = await asyncio.to_thread(
                 skills.gather, model, messages, plan["options"],
-                [n for n in allowed if n not in required], False, None,
+                offer, False, None,
             )
+            logger.debug("[skills] model chose %s",
+                         [c["skill"] for c in calls])
             if calls:
                 messages = extra
             calls = prefetched + calls
             for call in calls:
                 skill = skills.load_skills().get(call["skill"])
+                # Prefetched skills already announced themselves before they
+                # ran. Saying "let me take a look" after a six-second head
+                # sweep has finished is worse than not saying it at all.
+                announced = any(call is done for done in prefetched)
                 trace["skills"].append({
                     "skill": call["skill"],
                     "arguments": call["arguments"],
@@ -2314,7 +2390,8 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True,
                     "result": json.dumps(call["result"])[:900],
                 })
                 yield {"type": "status", "state": "skill", "skill": call["skill"],
-                       "say": getattr(skill, "spoken_wait", None),
+                       "say": None if announced
+                              else getattr(skill, "spoken_wait", None),
                        "ok": bool(call["result"].get("ok"))}
             if calls:
                 note_sleep_change(calls)

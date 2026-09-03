@@ -458,26 +458,39 @@ def _stream_gemini(messages: list[dict], model: str,
 
 def describe_image(jpeg: bytes, question: str, model: str, provider: str,
                    options: dict | None = None) -> str:
+    """One view. See describe_images for the general case."""
+    return describe_images([jpeg], question, model, provider, options)
+
+
+def describe_images(jpegs: list[bytes], question: str, model: str,
+                    provider: str, options: dict | None = None) -> str:
     """
-    Ask the model what it can see.
+    Ask the model what it can see, across one or more views.
+
+    Several images matter for anything about the room rather than about what is
+    directly in front of him: "how many people are here" cannot be answered
+    from a single forward frame, and a robot that answers it anyway is guessing.
 
     Only Gemini and Anthropic take images; the local models here are text-only,
     so this raises rather than returning something invented. A robot that
     describes a room it cannot see is worse than one that says it cannot see.
     """
     options = options or {}
+    jpegs = [j for j in jpegs if j]
+    if not jpegs:
+        raise RuntimeError("no images to look at")
     if provider == GEMINI:
         import requests
 
         key = api_key(GEMINI)
         if not key:
             raise RuntimeError("no Gemini API key configured")
+        parts = [{"inline_data": {"mime_type": "image/jpeg",
+                                  "data": base64.b64encode(j).decode()}}
+                 for j in jpegs]
+        parts.append({"text": question})
         body = {
-            "contents": [{"role": "user", "parts": [
-                {"inline_data": {"mime_type": "image/jpeg",
-                                 "data": base64.b64encode(jpeg).decode()}},
-                {"text": question},
-            ]}],
+            "contents": [{"role": "user", "parts": parts}],
             "generationConfig": {"maxOutputTokens": MAX_OUTPUT_TOKENS,
                                  "temperature": float(
                                      options.get("temperature", 0.4))},
@@ -503,9 +516,9 @@ def describe_image(jpeg: bytes, question: str, model: str, provider: str,
             model=model or SUGGESTED_MODELS[ANTHROPIC][0],
             max_tokens=MAX_OUTPUT_TOKENS,
             messages=[{"role": "user", "content": [
-                {"type": "image", "source": {
+                *[{"type": "image", "source": {
                     "type": "base64", "media_type": "image/jpeg",
-                    "data": base64.b64encode(jpeg).decode()}},
+                    "data": base64.b64encode(j).decode()}} for j in jpegs],
                 {"type": "text", "text": question},
             ]}],
         )

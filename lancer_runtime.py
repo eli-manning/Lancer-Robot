@@ -28,6 +28,10 @@ DEFAULTS: dict[str, Any] = {
     # API keys live in lancer_secrets.json, never here -- this file is tracked.
     "llm_provider": "ollama",
     "llm_model": "qwen2.5:3b",
+    # Choosing which skill to call is a much easier job than writing the answer,
+    # and it sits on the critical path before the first word. A smaller model
+    # does it in about a third of the time. Blank means use llm_model.
+    "tool_model": "",
     "temperature": 0.3,
     "max_sentences": 3,
     # Messages, not exchanges. Six was three turns, which is not enough to

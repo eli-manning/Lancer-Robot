@@ -32,6 +32,22 @@ logger = logging.getLogger(__name__)
 
 SKILLS_DIR = Path(__file__).parent / "skills"
 SKILL_TIMEOUT = 12          # seconds; a slow API must not stall a spoken reply
+
+
+def _skill_timeout() -> int:
+    """
+    The configured timeout, not the constant above.
+
+    The setting existed, the dashboard offered it, and nothing read it -- so
+    raising it did nothing and the camera sweep, which needs about fifteen
+    seconds, was killed at twelve every time.
+    """
+    try:
+        import lancer_runtime as rt
+
+        return int(rt.get("skill_timeout") or SKILL_TIMEOUT)
+    except Exception:
+        return SKILL_TIMEOUT
 MAX_RESULT_CHARS = 4000     # what comes back gets read by a model, not a human
 
 # Tool loops go wrong in two directions: the model calls nothing and answers
@@ -111,11 +127,12 @@ class Skill:
                 input=json.dumps(arguments or {}),
                 capture_output=True,
                 text=True,
-                timeout=SKILL_TIMEOUT,
+                timeout=_skill_timeout(),
                 cwd=str(self.path),
             )
         except subprocess.TimeoutExpired:
-            logger.warning("Skill %s timed out after %ss", self.name, SKILL_TIMEOUT)
+            logger.warning("Skill %s timed out after %ss",
+                           self.name, _skill_timeout())
             return {"ok": False, "error": "timeout"}
 
         elapsed = time.monotonic() - started
@@ -224,15 +241,25 @@ def gather(
     if not schemas:
         return list(messages), []
 
-    if provider is None:
-        import lancer_runtime as rt
+    import lancer_runtime as rt
 
+    if provider is None:
         provider = str(rt.get("llm_provider") or llm.OLLAMA)
+    # Tool selection is a classification, not a composition, and it is a whole
+    # round trip in front of the first spoken word. A smaller model does it in
+    # roughly a third of the time and picks the same tools.
+    model = str(rt.get("tool_model") or model)
     # Sending schemas to a provider that cannot act on them costs a round trip
     # and returns nothing, so skip straight to the answer. The rule-driven
     # skills the caller already ran are unaffected.
     if not llm.supports_tool_calls(provider):
         return list(messages), []
+
+    # Names the model was actually offered this turn. It can emit others --
+    # from earlier context, or invented outright -- and running those means the
+    # allowlist decides what the model is shown rather than what it can do.
+    offered = {(schema.get("function") or schema).get("name")
+               for schema in schemas}
 
     calls: list[dict] = []
     working = list(messages)
@@ -269,7 +296,19 @@ def gather(
                     on_call(name, arguments)
                 except Exception:
                     pass
-            result = run_skill(name, arguments, approve=approve)
+            if name not in offered:
+                # Refused, and told why, so the model can answer without it
+                # rather than looping on a tool it cannot have. Gemini asked
+                # for `look` on a turn where look had deliberately been
+                # withheld -- it had already run by rule -- and the loop ran it
+                # again, sweeping the head twice for one question. The
+                # allowlist has to decide what runs, not just what is shown.
+                logger.warning("Refusing %s: not offered this turn (offered %s)",
+                               name, sorted(offered))
+                result = {"ok": False,
+                          "error": f"{name} is not available on this turn"}
+            else:
+                result = run_skill(name, arguments, approve=approve)
             calls.append({"skill": name, "arguments": arguments, "result": result})
             logger.info("Tool call %s(%s) -> ok=%s", name, arguments, result.get("ok"))
             working.append({
@@ -281,71 +320,3 @@ def gather(
     return working, calls
 
 
-def chat_with_skills(
-    model: str,
-    messages: list[dict],
-    options: dict | None = None,
-    allow: list[str] | None = None,
-    approve: bool = False,
-    on_call=None,
-) -> tuple[str, list[dict]]:
-    """
-    Run a chat turn in which the model may call skills.
-
-    Returns (answer_text, calls) where calls records what ran, so the caller can
-    log it, show it on the dashboard, and -- importantly for a talking robot --
-    know whether the answer came from a live source or from the model's memory.
-
-    on_call(skill_name, arguments) is invoked before each call, which is how the
-    voice path gets to say "let me check that" instead of going silent for two
-    seconds.
-    """
-    import ollama
-
-    schemas = tool_schemas(allow)
-    calls: list[dict] = []
-    working = list(messages)
-
-    for _ in range(MAX_TOOL_ITERATIONS):
-        response = ollama.chat(
-            model=model,
-            messages=working,
-            tools=schemas or None,
-            options=options or {},
-        )
-        message = response["message"]
-        tool_calls = message.get("tool_calls") or []
-        if not tool_calls:
-            return (message.get("content") or "").strip(), calls
-
-        # Keep the assistant's tool-call turn in history; without it the model
-        # sees tool results answering a question it never asked.
-        working.append(message)
-        for call in tool_calls:
-            function = call.get("function", {})
-            name = function.get("name", "")
-            arguments = function.get("arguments") or {}
-            if isinstance(arguments, str):
-                try:
-                    arguments = json.loads(arguments)
-                except json.JSONDecodeError:
-                    arguments = {}
-            if on_call:
-                try:
-                    on_call(name, arguments)
-                except Exception:
-                    pass
-
-            result = run_skill(name, arguments, approve=approve)
-            calls.append({"skill": name, "arguments": arguments, "result": result})
-            logger.info("Tool call %s(%s) -> ok=%s",
-                        name, arguments, result.get("ok"))
-            working.append({
-                "role": "tool",
-                "name": name,
-                "content": json.dumps(result)[:MAX_RESULT_CHARS],
-            })
-
-    # Out of iterations: ask once more with tools withdrawn so it has to answer.
-    response = ollama.chat(model=model, messages=working, options=options or {})
-    return (response["message"].get("content") or "").strip(), calls

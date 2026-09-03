@@ -1,14 +1,18 @@
 {
   "name": "look",
-  "description": "Look through your camera and describe what you actually see right now. Use it whenever someone asks what you can see, who is there, what they are holding or wearing, what is written on something they show you, or to comment on the room. Do not guess at any of these without calling this first -- you cannot see anything until you do.",
-  "risk": "read",
+  "description": "Look through your camera and describe what you actually see. Use it whenever someone asks what you can see, who is there, what they are holding or wearing, what is written on something, or anything about the room. Set survey to true for questions about the room as a whole -- how many people are here, what is around you, what is behind you, is anyone else here -- and you will turn your head and take in the whole space instead of answering from one forward glance. Never guess at any of this without calling this first: you cannot see anything until you do.",
+  "risk": "motion",
   "spoken_wait": "Let me take a look.",
   "parameters": {
     "type": "object",
     "properties": {
       "question": {
         "type": "string",
-        "description": "What to look for, in plain words: 'what am I holding', 'what does this sign say', 'who is in front of you', 'describe the room'. Defaults to a general description."
+        "description": "What to look for, in plain words: 'what am I holding', 'what does this sign say', 'how many people are here', 'describe the room'."
+      },
+      "survey": {
+        "type": "boolean",
+        "description": "True for anything about the room or space as a whole rather than what is straight ahead. Turns the head to take in the left, centre and right before answering. Slower, so leave it false for 'what am I holding'."
       }
     }
   }
