@@ -167,12 +167,71 @@ University, built by the ACM student chapter. You are talking out loud with some
 They have asked for something creative or open-ended -- an idea, an opinion, a \
 joke, some advice. Actually do it, and enjoy it:
 - Be genuinely funny, warm and a bit irreverent. Have real opinions.
-- Two to five sentences, plain speech, no markdown or lists.
+- {LENGTH} Plain speech, no markdown or lists.
 - Commit to the bit. A hedged joke is not a joke.
 
 One rule: do not state facts about CBU that you were not given. Talk about the \
 university in general terms, or say you would have to look the specifics up. \
 Never invent a course code, a number, a person or a requirement."""
+
+
+# Things asked of the robot itself rather than of the documents. "Nod at me"
+# retrieved a CBU chunk, scored relevant, and took the grounded route -- which
+# deliberately offers no tools -- so the gesture was unreachable and he answered
+# that his head was fixed in place, which is not true and not what was asked.
+# No document answers these, so they never belong on that route.
+_SELF_COMMAND_RE = _re.compile(
+    r"\b(nod|shake your head|wave|dance|bow|wiggle|spin|look (at|around|left|"
+    r"right|up|down)|turn (around|toward|to face)|wake up|go to sleep|"
+    r"take a nap|be quiet|shush|speak up|slow down|speed up|"
+    r"turn (it|yourself|your volume) (up|down)|"
+    r"set a timer|start a timer|cancel the timer|how long (is )?left)\b"
+    r"|\byou'?re too (loud|quiet|fast|slow)\b"
+    r"|\b(louder|quieter|softer)\b",
+    _re.I,
+)
+
+
+def is_self_command(text: str) -> bool:
+    """Whether this asks the robot to do something rather than to know something."""
+    return bool(_SELF_COMMAND_RE.search(text or ""))
+
+
+def _length_rule() -> str:
+    """
+    How long an answer may be, from the setting rather than from the prompt.
+
+    The prompts said "two to four sentences", which is a floor as much as a
+    ceiling: lowering max_sentences to one only truncated the third sentence
+    mid-thought, because the model had still been told to write two. It is a
+    maximum now, and the shorter settings say outright that less is fine.
+    """
+    limit = int(rt.get("max_sentences") or 3)
+    if limit <= 1:
+        return ("One sentence. Not two -- say the single most useful thing and "
+                "stop.")
+    if limit == 2:
+        return "At most two sentences, and one is often plenty."
+    return (f"At most {limit} sentences, fewer when fewer will do. "
+            "Nobody minds a short answer.")
+
+
+# Doing something can be the whole answer. Without this he narrates every
+# gesture -- "I'll give you a nod!" -- which is both the thing and a
+# description of the thing, and takes longer than the nod.
+ACTION_RULE = (
+    "Gestures happen while you are talking, not before, so use them freely "
+    "alongside what you say. "
+    "When you have already answered by doing something -- a nod, a gesture, "
+    "turning your own volume down, setting a timer -- a few words is plenty, "
+    "and saying nothing at all is fine. Do not narrate what you just did, and "
+    "never describe a gesture in words as well as making it."
+)
+
+
+def fill_prompt(text: str) -> str:
+    """Put the configured limits into a prompt written with placeholders."""
+    return text.replace("{LENGTH}", _length_rule())
 
 
 def _needs_cbu_facts(text: str) -> bool:
@@ -184,7 +243,7 @@ GENERAL_PROMPT = """You are Lancer, a small desk robot at California Baptist \
 University, built by the ACM student chapter. You are talking out loud with someone.
 
 This one is not about CBU, so just be good company:
-- Two to four sentences, plain speech, no markdown or lists.
+- {LENGTH} Plain speech, no markdown or lists.
 - Relaxed and a bit funny. Dry wit is welcome. Have an opinion.
 - Chat, explain, joke -- whatever fits.
 - Do not state facts about California Baptist University here. If they want CBU \
@@ -539,7 +598,7 @@ graduating on time, just help them.
 - No corporate cheer, no "I'd be happy to assist you", no exclamation-mark spam.
 
 How to answer:
-- Two to four sentences. Short enough to listen to.
+- {LENGTH} Short enough to listen to.
 - Plain speech only: no markdown, bullets, numbered lists or headings.
 - Spell out abbreviations the first time so they sound right out loud.
 - Do not open with a greeting unless they greeted you first.
@@ -1984,9 +2043,10 @@ def prefetch_plan(query: str) -> list[tuple[str, dict]]:
 
 SKILL_HINT = (
     "You have tools for things you cannot know on your own: the current date "
-    "and time, live campus weather, and Wikipedia lookups. Call them rather "
-    "than guessing -- you have no idea what today's date is without asking. "
-    "Never use a tool for California Baptist University facts."
+    "and time, live campus weather, Wikipedia lookups, your own camera, your "
+    "volume and pace, and timers. Call them rather than guessing -- you have "
+    "no idea what today's date is, or what is in front of you, without asking. "
+    "Never use a tool for California Baptist University facts. " + ACTION_RULE
 )
 
 
@@ -2010,7 +2070,10 @@ def plan_turn(query: str, history: list[dict], face: bool = False) -> dict:
     remembered = memory.recall_prompt() if cfg.get("memory_enabled", True) else ""
 
     def system(*blocks: str) -> list[dict]:
-        return [{"role": "system", "content": b} for b in blocks if b]
+        # One place fills the placeholders, so a prompt can state the limit
+        # without every prompt hard-coding a number the setting then contradicts.
+        return [{"role": "system", "content": fill_prompt(b)}
+                for b in blocks if b]
 
     if is_creative(query):
         grounding = (f"Some CBU material that may help:\n\n{context}" if relevant
@@ -2041,6 +2104,18 @@ def plan_turn(query: str, history: list[dict], face: bool = False) -> dict:
                 "options": {"temperature": cfg["temperature"]},
                 "context": "", "sources": [], "verify": "guarded",
             }
+        return {
+            "mode": "general",
+            "messages": [*system(GENERAL_PROMPT, remembered, SKILL_HINT),
+                         *history[-turns:], {"role": "user", "content": query}],
+            "options": {"temperature": cfg["temperature"]},
+            "context": "", "sources": [], "verify": "none",
+        }
+
+    if is_self_command(query):
+        # Answered by doing, not by retrieval. Sent to the general route, which
+        # is where the tools live.
+        logger.info("Self-command -- routing to general rather than grounded")
         return {
             "mode": "general",
             "messages": [*system(GENERAL_PROMPT, remembered, SKILL_HINT),
@@ -2347,8 +2422,15 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True,
                 yield {"type": "status", "state": "skill", "skill": name,
                        "say": getattr(skills.load_skills().get(name),
                                       "spoken_wait", None), "ok": True}
-                result = await asyncio.to_thread(skills.run_skill, name,
-                                                 arguments)
+                skill = skills.load_skills().get(name)
+                if skill is not None and skill.concurrent:
+                    threading.Thread(target=skills.run_skill,
+                                     args=(name, arguments),
+                                     daemon=True).start()
+                    result = {"ok": True, "detail": "started"}
+                else:
+                    result = await asyncio.to_thread(skills.run_skill, name,
+                                                     arguments)
                 prefetched.append({"skill": name, "arguments": arguments,
                                    "result": result})
                 messages = [*messages[:-1], {
@@ -2357,6 +2439,12 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True,
                                 f"authoritative, use it and do not contradict "
                                 f"it:\n{json.dumps(result)}"),
                 }, messages[-1]]
+                # The grounding check compares each sentence against the
+                # context. A skill result is context: without this, "volume is
+                # now 85" was judged an unsupported claim and replaced with "I
+                # don't have that" -- after the volume had actually changed.
+                plan["context"] = (plan.get("context") or "") + \
+                    f"\n\nResult from {name}: {json.dumps(result)}"
 
             # The model gets to choose tools even when a rule already fired.
             # Skipping that saved a round trip but assumed the prefetch had
@@ -2375,6 +2463,10 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True,
                          [c["skill"] for c in calls])
             if calls:
                 messages = extra
+                for call in calls:
+                    plan["context"] = (plan.get("context") or "") + \
+                        f"\n\nResult from {call['skill']}: " \
+                        f"{json.dumps(call['result'])}"
             calls = prefetched + calls
             for call in calls:
                 skill = skills.load_skills().get(call["skill"])
@@ -2415,6 +2507,8 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True,
                     return
 
         verify = plan.get("verify", "none")
+        # Read after the skills ran, so their results are part of what the
+        # grounding check counts as evidence.
         context = plan.get("context", "")
         truncated = False
 

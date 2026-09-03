@@ -24,6 +24,7 @@ import json
 import logging
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -93,6 +94,11 @@ class Skill:
         # Cheap skills (a clock read) should not be announced; slow ones
         # (a network call) let the robot say something while it waits.
         self.spoken_wait: str | None = manifest.get("spoken_wait")
+        # True when the answer does not need this skill's result, so it can run
+        # alongside the speech instead of in front of it. A nod is the obvious
+        # case: waiting for the head to finish moving before saying a word is
+        # what makes the robot feel like it takes turns with itself.
+        self.concurrent: bool = bool(manifest.get("concurrent"))
 
     @property
     def tool_schema(self) -> dict:
@@ -296,6 +302,20 @@ def gather(
                     on_call(name, arguments)
                 except Exception:
                     pass
+            skill = load_skills().get(name)
+            if skill is not None and skill.concurrent and name in offered:
+                # Started and left to run. The model gets an immediate result
+                # so the tool loop can finish and the answer can begin.
+                threading.Thread(target=run_skill, args=(name, arguments),
+                                 kwargs={"approve": approve},
+                                 daemon=True).start()
+                result = {"ok": True, "detail": "started -- it happens while "
+                                                "you speak, do not describe it"}
+                calls.append({"skill": name, "arguments": arguments,
+                              "result": result})
+                working.append({"role": "tool", "name": name,
+                                "content": json.dumps(result)})
+                continue
             if name not in offered:
                 # Refused, and told why, so the model can answer without it
                 # rather than looping on a tool it cannot have. Gemini asked
