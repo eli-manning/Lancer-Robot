@@ -64,6 +64,36 @@ def pick_server() -> str:
             continue
     logger.warning("No RAG server reachable; defaulting to %s", SERVER_URL)
     return SERVER_URL
+
+
+# The server was chosen once, at startup. Boot before the network is up -- or
+# with Tailscale still connecting -- and SERVER_URL stayed pointed at the dead
+# wired address for the life of the app. Every request then failed into a
+# caught exception, so the robot went deaf and mute with nothing logged and
+# nothing to see: the app was "running" and simply never spoke to anyone again.
+_server_failures = {"count": 0, "last_repick": 0.0}
+_REPICK_AFTER_FAILURES = 3
+_REPICK_INTERVAL = 15.0
+
+
+def note_server_failure() -> None:
+    """A request did not get through; look for the server again if this keeps up."""
+    _server_failures["count"] += 1
+    if _server_failures["count"] < _REPICK_AFTER_FAILURES:
+        return
+    now = time.monotonic()
+    if now - _server_failures["last_repick"] < _REPICK_INTERVAL:
+        return
+    _server_failures["last_repick"] = now
+    _server_failures["count"] = 0
+    previous = SERVER_URL
+    chosen = pick_server()
+    if chosen != previous:
+        logger.info("Server moved: %s -> %s", previous, chosen)
+
+
+def note_server_success() -> None:
+    _server_failures["count"] = 0
 REQUEST_TIMEOUT = 120        # seconds; local LLM generation can be slow
 
 SAMPLE_RATE = 16000          # matches reachy_mini.media AudioBase.SAMPLE_RATE
@@ -579,6 +609,7 @@ class Lancer:
                             files={"file": ("f.jpg", beat, "image/jpeg")},
                             timeout=4,
                         ).json()
+                        note_server_success()
                         if answer.get("say"):
                             self.speak_announcement(answer["say"])
                         hold_ms = answer.get("hold_ms")
@@ -589,7 +620,7 @@ class Lancer:
                             self.hold_head_until = (time.monotonic()
                                                     + float(hold_ms) / 1000.0)
                 except Exception:
-                    pass
+                    note_server_failure()
 
             # YuNet runs on the robot with no network hop, so it is much lower
             # latency than shipping a frame to the Mac and back. Let it lead and
