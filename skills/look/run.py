@@ -30,8 +30,14 @@ SERVER = os.environ.get("LANCER_SERVER_SELF", "http://127.0.0.1:7870")
 # room. Measured on the hardware: a full three-radian swing completes in about
 # two and a half seconds, so this costs seconds rather than the minute a
 # cautious guess would have budgeted.
-SWEEP = (1.6, 0.8, 0.0, -0.8, -1.6)
+# (body yaw, head yaw) for each look. The base stops at about 113 degrees each
+# way; adding the neck's 35 at the two extremes reaches past that, so the pair
+# together sweeps roughly 285 degrees of aim. With the camera's own field of
+# view on top, that is the whole room -- there is no blind spot worth the extra
+# seconds it would cost to cover.
+SWEEP = ((1.85, 0.6), (1.0, 0.0), (0.0, 0.0), (-1.0, 0.0), (-1.85, -0.6))
 BODY_LIMIT = 1.9
+HEAD_LIMIT = 0.65
 MOVE_SECONDS = 1.2
 # The app posts a frame about once a second, so a shorter wait than this hands
 # the model the previous angle's picture and the survey silently sees nothing new.
@@ -87,13 +93,18 @@ def _sweep() -> list[bytes]:
         started_at = float(started_at)
     except (TypeError, ValueError):
         started_at = 0.0
+    ok, pose = robot_get("/api/state/present_head_pose", timeout=6)
+    rest_pose = pose if ok and isinstance(pose, dict) else {}
     robot_post("/api/media/tracking/disable", timeout=6)
     frames: list[bytes] = []
     try:
-        for yaw in SWEEP:
-            target = max(-BODY_LIMIT, min(BODY_LIMIT, yaw))
+        for body_yaw, head_yaw in SWEEP:
+            head = {k: rest_pose.get(k, 0.0)
+                    for k in ("x", "y", "z", "roll", "pitch")}
+            head["yaw"] = max(-HEAD_LIMIT, min(HEAD_LIMIT, head_yaw))
             robot_post("/api/move/goto",
-                       {"body_yaw": target, "duration": MOVE_SECONDS},
+                       {"body_yaw": max(-BODY_LIMIT, min(BODY_LIMIT, body_yaw)),
+                        "head_pose": head, "duration": MOVE_SECONDS},
                        timeout=10)
             time.sleep(MOVE_SECONDS + SETTLE_SECONDS)
             jpeg = _frame()
@@ -102,9 +113,12 @@ def _sweep() -> list[bytes]:
     finally:
         # Always turn back to where he was facing and hand tracking over again,
         # even if a move failed -- otherwise he is left staring at a wall.
+        home = {k: rest_pose.get(k, 0.0)
+                for k in ("x", "y", "z", "roll", "pitch")}
+        home["yaw"] = 0.0
         robot_post("/api/move/goto",
-                   {"body_yaw": started_at, "duration": MOVE_SECONDS + 0.6},
-                   timeout=10)
+                   {"body_yaw": started_at, "head_pose": home,
+                    "duration": MOVE_SECONDS + 0.6}, timeout=10)
         robot_post("/api/media/tracking/enable", {"weight": 1.0}, timeout=6)
         try:
             requests.post(f"{SERVER}/api/hold", json={"seconds": 0}, timeout=5)
