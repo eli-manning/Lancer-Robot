@@ -2366,21 +2366,35 @@ def plan_turn(query: str, history: list[dict], face: bool = False) -> dict:
     path the robot does not actually take.
     """
     query = contextualize(query, history)
+    cfg = rt.load()
+    turns = int(cfg["history_turns"])
+    remembered = memory.recall_prompt() if cfg.get("memory_enabled", True) else ""
+
+    def system(*blocks: str) -> list[dict]:
+        return [{"role": "system", "content": fill_prompt(b)}
+                for b in blocks if b]
+
+    # Asked to do something, before anything else gets a say. This was the last
+    # check in the function, so every earlier branch beat it: "can you look at
+    # me" matched a canned social reply and never reached the camera, and "go
+    # to sleep" was answered by a model promising to close its optical sensors
+    # while staying wide awake. Nothing retrieval or small talk has to offer
+    # can answer a command aimed at the robot.
+    if is_self_command(query):
+        logger.info("Self-command -- routing to general rather than grounded")
+        return {
+            "mode": "general",
+            "messages": [*system(GENERAL_PROMPT, remembered, SKILL_HINT),
+                         *history[-turns:], {"role": "user", "content": query}],
+            "options": {"temperature": cfg["temperature"]},
+            "context": "", "sources": [], "verify": "none",
+        }
 
     social = social_reply(query)
     if social is not None:
         return {"mode": "social", "answer": social, "sources": [], "context": ""}
 
     context, sources, relevant, score = smart_retrieve(query, history)
-    cfg = rt.load()
-    turns = int(cfg["history_turns"])
-    remembered = memory.recall_prompt() if cfg.get("memory_enabled", True) else ""
-
-    def system(*blocks: str) -> list[dict]:
-        # One place fills the placeholders, so a prompt can state the limit
-        # without every prompt hard-coding a number the setting then contradicts.
-        return [{"role": "system", "content": fill_prompt(b)}
-                for b in blocks if b]
 
     if is_creative(query):
         grounding = (f"Some CBU material that may help:\n\n{context}" if relevant
@@ -2411,18 +2425,6 @@ def plan_turn(query: str, history: list[dict], face: bool = False) -> dict:
                 "options": {"temperature": cfg["temperature"]},
                 "context": "", "sources": [], "verify": "guarded",
             }
-        return {
-            "mode": "general",
-            "messages": [*system(GENERAL_PROMPT, remembered, SKILL_HINT),
-                         *history[-turns:], {"role": "user", "content": query}],
-            "options": {"temperature": cfg["temperature"]},
-            "context": "", "sources": [], "verify": "none",
-        }
-
-    if is_self_command(query):
-        # Answered by doing, not by retrieval. Sent to the general route, which
-        # is where the tools live.
-        logger.info("Self-command -- routing to general rather than grounded")
         return {
             "mode": "general",
             "messages": [*system(GENERAL_PROMPT, remembered, SKILL_HINT),

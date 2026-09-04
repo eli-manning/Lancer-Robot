@@ -84,7 +84,7 @@ def _sweep() -> list[bytes]:
     # back between steps, so a commanded 35 degrees arrived as 22 and drifted
     # home. The hold rides the app's heartbeat, so give it a beat to land.
     try:
-        requests.post(f"{SERVER}/api/hold", json={"seconds": 20}, timeout=5)
+        requests.post(f"{SERVER}/api/hold", json={"seconds": 30}, timeout=5)
         time.sleep(1.1)
     except requests.RequestException:
         pass
@@ -116,10 +116,18 @@ def _sweep() -> list[bytes]:
         home = {k: rest_pose.get(k, 0.0)
                 for k in ("x", "y", "z", "roll", "pitch")}
         home["yaw"] = 0.0
+        home_seconds = MOVE_SECONDS + 0.6
         robot_post("/api/move/goto",
                    {"body_yaw": started_at, "head_pose": home,
-                    "duration": MOVE_SECONDS + 0.6}, timeout=10)
+                    "duration": home_seconds}, timeout=10)
+        # Wait for the way back before handing the joints over. Enabling the
+        # daemon's tracker and releasing the app's hold while the return move
+        # was still running put three writers on the same servos at once, and
+        # the robot shook its way home. Hand back one at a time, and only once
+        # nothing of ours is still moving.
+        time.sleep(home_seconds + 0.4)
         robot_post("/api/media/tracking/enable", {"weight": 1.0}, timeout=6)
+        time.sleep(0.3)
         try:
             requests.post(f"{SERVER}/api/hold", json={"seconds": 0}, timeout=5)
         except requests.RequestException:
