@@ -24,13 +24,18 @@ from _robot import robot_get, robot_post            # noqa: E402
 
 SERVER = os.environ.get("LANCER_SERVER_SELF", "http://127.0.0.1:7870")
 
-# Head yaw for each look, in radians. Roughly 35 degrees either side: wide
-# enough to cover a room from a desk, inside what the neck will do comfortably.
-SWEEP = (0.62, 0.0, -0.62)
-MOVE_SECONDS = 0.5
+# The body, not the neck. The neck manages about 35 degrees either side, which
+# is a glance; the base turns to roughly 113 degrees each way before it stops,
+# and with the camera's own field of view that covers essentially the whole
+# room. Measured on the hardware: a full three-radian swing completes in about
+# two and a half seconds, so this costs seconds rather than the minute a
+# cautious guess would have budgeted.
+SWEEP = (1.6, 0.8, 0.0, -0.8, -1.6)
+BODY_LIMIT = 1.9
+MOVE_SECONDS = 1.2
 # The app posts a frame about once a second, so a shorter wait than this hands
 # the model the previous angle's picture and the survey silently sees nothing new.
-SETTLE_SECONDS = 1.2
+SETTLE_SECONDS = 1.1
 
 PROMPT = (
     "You are looking through your own camera, as a small desk robot. "
@@ -38,14 +43,17 @@ PROMPT = (
     "actually visible. If you cannot make something out, say so plainly rather "
     "than guessing. Do not mention the photograph, the image, the camera, "
     "lighting or resolution -- just say what is there. Describe what people are "
-    "doing, holding or wearing; do not guess at anyone's ethnicity, age, or "
-    "anything else you cannot actually see."
+    "doing, holding or wearing. Do not guess at anyone's ethnicity, gender, age "
+    "or anything else you cannot actually see. Say 'a person' when you do not "
+    "know: a robot on a campus desk guessing at those is worse than one that "
+    "simply counts."
 )
 SURVEY_NOTE = (
-    " These are several views taken by turning your head from your left, to "
-    "the centre, to your right. Together they are one room, so do not count "
-    "the same person twice if they appear in more than one view, and answer "
-    "about the whole space rather than describing each picture."
+    " These are several views taken by turning right around, from your far "
+    "left to your far right, so between them they cover the whole room. "
+    "Neighbouring views overlap, so the same person often appears in two of "
+    "them -- count each person once, and answer about the whole space rather "
+    "than describing each picture."
 )
 
 
@@ -65,33 +73,43 @@ def _sweep() -> list[bytes]:
     sequence does it: the daemon's face tracker and this are both steering the
     head, and two writers on the same servos is how the head ends up shaking.
     """
-    ok, pose = robot_get("/api/state/present_head_pose", timeout=6)
-    base = pose if ok and isinstance(pose, dict) else {}
+    # Two things steer this head: the daemon's face tracker and the app's own
+    # aiming loop. Disabling only the first left the second pulling the head
+    # back between steps, so a commanded 35 degrees arrived as 22 and drifted
+    # home. The hold rides the app's heartbeat, so give it a beat to land.
+    try:
+        requests.post(f"{SERVER}/api/hold", json={"seconds": 20}, timeout=5)
+        time.sleep(1.1)
+    except requests.RequestException:
+        pass
+    ok, started_at = robot_get("/api/state/present_body_yaw", timeout=6)
+    try:
+        started_at = float(started_at)
+    except (TypeError, ValueError):
+        started_at = 0.0
     robot_post("/api/media/tracking/disable", timeout=6)
     frames: list[bytes] = []
     try:
         for yaw in SWEEP:
-            head = {
-                "x": base.get("x", 0.0), "y": base.get("y", 0.0),
-                "z": base.get("z", 0.0), "roll": base.get("roll", 0.0),
-                "pitch": base.get("pitch", 0.0), "yaw": yaw,
-            }
+            target = max(-BODY_LIMIT, min(BODY_LIMIT, yaw))
             robot_post("/api/move/goto",
-                       {"head_pose": head, "duration": MOVE_SECONDS},
-                       timeout=8)
+                       {"body_yaw": target, "duration": MOVE_SECONDS},
+                       timeout=10)
             time.sleep(MOVE_SECONDS + SETTLE_SECONDS)
             jpeg = _frame()
             if jpeg:
                 frames.append(jpeg)
     finally:
-        # Always put the head back and hand tracking over again, even if a
-        # move failed -- otherwise he is left staring at a wall.
-        head = {"x": base.get("x", 0.0), "y": base.get("y", 0.0),
-                "z": base.get("z", 0.0), "roll": base.get("roll", 0.0),
-                "pitch": base.get("pitch", 0.0), "yaw": 0.0}
+        # Always turn back to where he was facing and hand tracking over again,
+        # even if a move failed -- otherwise he is left staring at a wall.
         robot_post("/api/move/goto",
-                   {"head_pose": head, "duration": MOVE_SECONDS}, timeout=8)
+                   {"body_yaw": started_at, "duration": MOVE_SECONDS + 0.6},
+                   timeout=10)
         robot_post("/api/media/tracking/enable", {"weight": 1.0}, timeout=6)
+        try:
+            requests.post(f"{SERVER}/api/hold", json={"seconds": 0}, timeout=5)
+        except requests.RequestException:
+            pass
     return frames
 
 

@@ -88,7 +88,11 @@ async def eyes(file: UploadFile = File(...)) -> dict:
         _last_frame["jpeg"] = raw
         _last_frame["at"] = time.time()
     say = _announcement()
-    return {"ok": True, **({"say": say} if say else {})}
+    import server
+
+    hold_ms = server.hold_remaining_ms()
+    return {"ok": True, **({"say": say} if say else {}),
+            **({"hold_ms": hold_ms} if hold_ms else {})}
 
 
 @router.get("/api/frame")

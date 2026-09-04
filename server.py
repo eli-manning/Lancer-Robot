@@ -2043,6 +2043,22 @@ async def silence_alarm() -> dict:
     return {"ok": True, "was_ringing": stop_ringing("dashboard")}
 
 
+@app.post("/api/hold")
+async def hold_head(payload: dict | None = None) -> dict:
+    """
+    Ask the robot to stop steering its own head for a moment.
+
+    Used by anything that needs to aim the head itself -- the survey sweep --
+    because the app's aiming loop otherwise fights it move for move.
+    """
+    seconds = float((payload or {}).get("seconds") or 0)
+    if seconds <= 0:
+        release_head()
+    else:
+        hold_still(min(seconds, 30.0))
+    return {"ok": True, "hold_ms": hold_remaining_ms()}
+
+
 @app.post("/api/cue")
 async def play_cue(payload: dict) -> dict:
     """Play one of the non-speech cues through the robot's speaker."""
@@ -2122,6 +2138,26 @@ _RECONCILE_EVERY = 5.0
 _last_reconcile = {"at": 0.0}
 # A wake is in flight until this time; the motors are on their way up.
 _waking = {"until": 0.0}
+
+# While this is in the future the app leaves the head alone. Disabling the
+# daemon's face tracker is not enough: the app runs its own aiming loop, and
+# between the steps of a survey sweep it kept pulling the head back to whoever
+# it could see, so a commanded 0.62 radians arrived as 0.38 and then drifted
+# home. It stands down only while a move is playing, and each step's move ends
+# before the next frame is grabbed.
+_hold = {"until": 0.0}
+
+
+def hold_still(seconds: float) -> None:
+    _hold["until"] = time.monotonic() + max(0.0, float(seconds))
+
+
+def release_head() -> None:
+    _hold["until"] = 0.0
+
+
+def hold_remaining_ms() -> int:
+    return max(0, int((_hold["until"] - time.monotonic()) * 1000))
 
 
 def _reconcile_sleep() -> None:

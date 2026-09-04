@@ -208,6 +208,9 @@ class Lancer:
         self._move_checked = 0.0
         # Set from the server's closing frame: while asleep nothing tracks.
         self.sleeping = False
+        # Set from the server's heartbeat: something else is aiming the head
+        # right now (a survey sweep), so leave it alone until this passes.
+        self.hold_head_until = 0.0
         self.cues = sounds.Cues(
             mini,
             volume=float(self.opt("thinking_sound_volume", 0.06)),
@@ -578,6 +581,13 @@ class Lancer:
                         ).json()
                         if answer.get("say"):
                             self.speak_announcement(answer["say"])
+                        hold_ms = answer.get("hold_ms")
+                        if hold_ms:
+                            # Someone else is driving the head. Hands off until
+                            # they are done, or the sweep fights the aiming
+                            # loop and lands nowhere.
+                            self.hold_head_until = (time.monotonic()
+                                                    + float(hold_ms) / 1000.0)
                 except Exception:
                     pass
 
@@ -832,6 +842,8 @@ class Lancer:
 
     def hands_off(self) -> bool:
         """True when something else owns the joints and tracking must not move."""
+        if time.monotonic() < self.hold_head_until:
+            return True
         return (self.stopping or self.sleeping or not self.motors_live()
                 or self.move_playing())
 
