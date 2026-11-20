@@ -19,9 +19,13 @@ def main() -> int:
     action = str(args.get("action") or "status").strip().lower()
     try:
         if action == "start":
-            result = quiz.start()
+            result = quiz.start(topic=args.get("topic"))
             result["detail"] = (
-                f"Quiz started: {result['total']} questions about CBU, just for "
+                f"Quiz started: {result['total']} questions"
+                + {"sae": " about CBU Motorsports and its race cars",
+                   "cbu": " about CBU"}.get(str(args.get("topic") or "").lower(),
+                                            " about CBU and its race car team")
+                + ", just for "
                 "fun -- there is no prize, only bragging rights and a title at "
                 "the end. Say so in one short, playful line, then ask question "
                 "1 exactly as written in next.spoken.")

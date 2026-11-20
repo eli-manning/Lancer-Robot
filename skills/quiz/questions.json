@@ -166,6 +166,159 @@
         "reachy mini robot"
       ],
       "fact": "A Reachy Mini, from Pollen Robotics."
+    },
+    {
+      "q": "What is the name of CBU Motorsports' newest electric race car?",
+      "answer": "Charger 6",
+      "accept": [
+        "charger six",
+        "the charger 6"
+      ],
+      "fact": "It races at Michigan in June 2027.",
+      "topic": "sae"
+    },
+    {
+      "q": "Every June, where does CBU Motorsports race in the Formula SAE Electric competition?",
+      "options": [
+        "Daytona International Speedway",
+        "Michigan International Speedway",
+        "Laguna Seca",
+        "Indianapolis Motor Speedway"
+      ],
+      "answer": "Michigan International Speedway",
+      "accept": [
+        "michigan"
+      ],
+      "fact": "It's a four-day international competition, with teams from all over the world.",
+      "topic": "sae"
+    },
+    {
+      "q": "What was the name of CBU's very first electric race car?",
+      "answer": "eLancer 1",
+      "accept": [
+        "e lancer 1",
+        "elancer",
+        "e lancer",
+        "lancer electric 1",
+        "lancer electric",
+        "electric lancer"
+      ],
+      "fact": "eLancer 1 raced at Michigan in 2022. The electric team was founded in 2021 by Mathias Scarano.",
+      "topic": "sae"
+    },
+    {
+      "q": "How many battery cells are packed into Charger 6?",
+      "options": [
+        "96",
+        "144",
+        "432",
+        "1,000"
+      ],
+      "answer": "432",
+      "fact": "432 cells in six modules, for 7.8 kilowatt-hours.",
+      "topic": "sae"
+    },
+    {
+      "q": "The team designs its own battery management system for Charger 6. What is it called?",
+      "answer": "Lancer BMS",
+      "accept": [
+        "lancer",
+        "the lancer bms",
+        "lancer b m s"
+      ],
+      "fact": "It weighs under a pound. An off-the-shelf one is about five.",
+      "topic": "sae"
+    },
+    {
+      "q": "What does DRS stand for on Charger 6's rear wing?",
+      "answer": "drag reduction system",
+      "accept": [
+        "drag reduction"
+      ],
+      "fact": "A servo flattens part of the rear wing on the straights and cuts its drag by about a third.",
+      "topic": "sae"
+    },
+    {
+      "q": "In what year did CBU's combustion and electric teams merge to become CBU Motorsports?",
+      "options": [
+        "2016",
+        "2021",
+        "2024",
+        "2026"
+      ],
+      "answer": "2024",
+      "fact": "The combustion team dates back to 2016, and the electric team to 2021.",
+      "topic": "sae"
+    },
+    {
+      "q": "How many subsystems is Charger 6 split into, each with its own student lead?",
+      "options": [
+        "4",
+        "7",
+        "10",
+        "15"
+      ],
+      "answer": "10",
+      "fact": "Aero, composites, suspension, vehicle dynamics, chassis, battery, powertrain and cooling, driver controls, electronics and data.",
+      "topic": "sae"
+    },
+    {
+      "q": "In miles per hour, what is Charger 6's simulated top speed?",
+      "options": [
+        "50",
+        "89",
+        "120",
+        "150"
+      ],
+      "answer": "89",
+      "accept": [
+        "88",
+        "88.7",
+        "eighty nine"
+      ],
+      "fact": "88.7 miles per hour, in simulation.",
+      "topic": "sae"
+    },
+    {
+      "q": "What brand of motor powers Charger 6?",
+      "options": [
+        "Tesla",
+        "EMRAX",
+        "Honda",
+        "Bosch"
+      ],
+      "answer": "EMRAX",
+      "accept": [
+        "emrax 228",
+        "em rax",
+        "emracks",
+        "m racks",
+        "em racks"
+      ],
+      "fact": "An EMRAX 228 axial-flux motor, 124 kilowatts at peak.",
+      "topic": "sae"
+    },
+    {
+      "q": "Who is the president of CBU Motorsports this year?",
+      "answer": "Christopher Petrov",
+      "accept": [
+        "chris petrov",
+        "petrov"
+      ],
+      "fact": "He leads Charger 6, with a goal of driving every event at Michigan.",
+      "topic": "sae"
+    },
+    {
+      "q": "Out of 1,000 points, what is the team's goal for Charger 6 at Michigan?",
+      "options": [
+        "150",
+        "300",
+        "600",
+        "900"
+      ],
+      "answer": "600",
+      "fact": "600 points would have placed 13th in 2026.",
+      "topic": "sae"
     }
   ]
 }

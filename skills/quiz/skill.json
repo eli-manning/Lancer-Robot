@@ -19,6 +19,14 @@
       "answer": {
         "type": "string",
         "description": "What the person said, word for word. Required for answer."
+      },
+      "topic": {
+        "type": "string",
+        "enum": [
+          "cbu",
+          "sae"
+        ],
+        "description": "Only with start. 'sae' for CBU Motorsports / race car questions, 'cbu' for campus questions; leave it out to mix both."
       }
     }
   }

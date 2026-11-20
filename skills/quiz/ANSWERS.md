@@ -41,3 +41,22 @@ It is just for fun -- no prize. Finished rounds are logged to `lancer_quiz_resul
 - What kind of robot am I? -- A Reachy Mini, from Pollen Robotics.
 
 Edit `skills/quiz/questions.json` to change any of this; this file is generated from it and will go stale if you do.
+
+## CBU Motorsports (SAE) questions
+
+Asked on their own for "quiz me on SAE" or "race car trivia"; a plain "quiz me" mixes them in.
+
+| # | Question | Answer | Also accepted |
+|---|---|---|---|
+| S1 | What is the name of CBU Motorsports' newest electric race car? | **Charger 6** | charger six, the charger 6 |
+| S2 | Every June, where does CBU Motorsports race in the Formula SAE Electric competition? | **Michigan International Speedway** | michigan |
+| S3 | What was the name of CBU's very first electric race car? | **eLancer 1** | e lancer 1, elancer, e lancer, lancer electric 1, lancer electric, electric lancer |
+| S4 | How many battery cells are packed into Charger 6? | **432** | - |
+| S5 | The team designs its own battery management system for Charger 6. What is it called? | **Lancer BMS** | lancer, the lancer bms, lancer b m s |
+| S6 | What does DRS stand for on Charger 6's rear wing? | **drag reduction system** | drag reduction |
+| S7 | In what year did CBU's combustion and electric teams merge to become CBU Motorsports? | **2024** | - |
+| S8 | How many subsystems is Charger 6 split into, each with its own student lead? | **10** | - |
+| S9 | In miles per hour, what is Charger 6's simulated top speed? | **89** | 88, 88.7, eighty nine |
+| S10 | What brand of motor powers Charger 6? | **EMRAX** | emrax 228, em rax, emracks, m racks, em racks |
+| S11 | Who is the president of CBU Motorsports this year? | **Christopher Petrov** | chris petrov, petrov |
+| S12 | Out of 1,000 points, what is the team's goal for Charger 6 at Michigan? | **600** | - |

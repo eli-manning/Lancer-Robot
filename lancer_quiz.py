@@ -116,10 +116,22 @@ def active() -> bool:
 # --- Playing ----------------------------------------------------------------
 
 
-def start(count: int | None = None, seed: int | None = None) -> dict:
-    """Begin a fresh quiz, throwing away any that was in progress."""
+TOPICS = ("cbu", "sae")
+
+
+def start(count: int | None = None, seed: int | None = None,
+          topic: str | None = None) -> dict:
+    """
+    Begin a fresh quiz, throwing away any that was in progress.
+
+    `topic` narrows the pool: "sae" for the CBU Motorsports questions, "cbu"
+    for the campus ones (anything untagged). No topic mixes everything.
+    """
     data = load_questions()
     pool = list(data["questions"])
+    topic = (topic or "").strip().lower()
+    if topic in TOPICS:
+        pool = [q for q in pool if (q.get("topic") or "cbu") == topic] or pool
     count = int(count or data.get("questions_per_quiz", 5))
     rng = random.Random(seed)
     rng.shuffle(pool)

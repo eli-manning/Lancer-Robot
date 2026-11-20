@@ -2507,6 +2507,11 @@ def prefetch_for(query: str) -> list[str]:
     return [name for name, _ in prefetch_plan(query)]
 
 
+# "Quiz me on SAE" / "race car trivia" asks for the CBU Motorsports questions.
+_SAE_TOPIC_RE = _re.compile(
+    r"\b(sae|s a e|motorsports?|race ?cars?|racing|charger|formula)\b", _re.I)
+
+
 def _quiz_plan(query: str) -> list[tuple[str, dict]]:
     """
     What the quiz needs this turn, which depends on state, not just words.
@@ -2517,6 +2522,8 @@ def _quiz_plan(query: str) -> list[tuple[str, dict]]:
     verbatim so the grader sees what was heard, not what the model made of it.
     """
     if wants_quiz(query):
+        if _SAE_TOPIC_RE.search(query or ""):
+            return [("quiz", {"action": "start", "topic": "sae"})]
         return [("quiz", {"action": "start"})]
     if quiz.active():
         return [("quiz", {"action": "answer", "answer": query})]

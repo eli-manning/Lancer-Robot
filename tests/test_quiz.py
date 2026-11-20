@@ -212,3 +212,56 @@ def test_the_keychain_is_gone():
     assert not server.wants_quiz("how do I get a keychain")
     assert "keychain" not in server.QUIZ_PROMPT.lower()
     assert "titles" in quiz.load_questions() and "rewards" not in quiz.load_questions()
+
+
+# --- SAE questions ---------------------------------------------------------
+
+
+def _sae():
+    return [q for q in quiz.load_questions()["questions"] if q.get("topic") == "sae"]
+
+
+def test_there_are_sae_questions_and_each_grades_its_own_answer():
+    questions = _sae()
+    assert len(questions) >= 10
+    for q in questions:
+        assert quiz.grade(q["answer"], q), q["q"]
+        for alt in q.get("accept", []):
+            assert quiz.grade(alt, q), (q["q"], alt)
+        if q.get("options"):
+            assert q["answer"] in q["options"], q["q"]
+            right = "abcd"[q["options"].index(q["answer"])]
+            assert quiz.grade(right, q), q["q"]
+            wrong = next(o for o in q["options"] if o != q["answer"])
+            assert not quiz.grade(wrong, q), (q["q"], wrong)
+
+
+def test_how_people_actually_say_the_sae_answers():
+    by_q = {q["q"]: q for q in _sae()}
+
+    def q(start):
+        return next(v for k, v in by_q.items() if k.startswith(start))
+
+    assert quiz.grade("charger six", q("What is the name of CBU Motorsports' newest"))
+    assert quiz.grade("I think it was E-Lancer One", q("What was the name of CBU's very first"))
+    assert quiz.grade("four thirty two", q("How many battery cells")) or \
+        quiz.grade("C", q("How many battery cells"))
+    assert quiz.grade("drag reduction system", q("What does DRS"))
+    assert quiz.grade("twenty twenty four", q("In what year did CBU's combustion"))
+    assert not quiz.grade("Daytona", q("Every June, where"))
+
+
+def test_an_sae_quiz_only_asks_sae_questions():
+    quiz.start(count=5, seed=7, topic="sae")
+    assert all(x.get("topic") == "sae" for x in quiz.current()["questions"])
+    quiz.start(count=5, seed=7, topic="cbu")
+    assert all(not x.get("topic") for x in quiz.current()["questions"])
+    quiz.quit()
+
+
+def test_asking_for_sae_trivia_picks_the_topic():
+    for line in ("quiz me on SAE", "give me some race car trivia",
+                 "Lancer, quiz me about CBU Motorsports"):
+        assert dict(server.prefetch_plan(line))["quiz"] == {
+            "action": "start", "topic": "sae"}, line
+    assert dict(server.prefetch_plan("quiz me"))["quiz"] == {"action": "start"}
