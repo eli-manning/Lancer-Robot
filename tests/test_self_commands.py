@@ -41,3 +41,18 @@ def test_real_questions_are_not_commands():
                  "when is the internship deadline",
                  "what is the weather like"):
         assert not server.is_self_command(line), line
+
+
+def test_reachy_is_his_name_not_another_robot():
+    # "Reachy, go to sleep" was answered as if Reachy were someone else.
+    assert server.normalize_transcript("Reachy, go to sleep.") == "Lancer, go to sleep."
+    assert server.normalize_transcript("Richie, what's up?") == "Lancer, what's up?"
+    # The robot model keeps its name.
+    assert "Reachy Mini" in server.normalize_transcript("Is that a Reachy Mini?")
+
+
+def test_go_to_sleep_does_not_depend_on_the_model():
+    for line in ("Lancer, go to sleep.", "time for bed", "take a nap",
+                 "Lancer, power down"):
+        assert dict(server.prefetch_plan(line)).get("rest") == {"action": "sleep"}, line
+    assert "rest" not in dict(server.prefetch_plan("how much sleep do students get"))

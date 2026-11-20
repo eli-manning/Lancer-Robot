@@ -374,7 +374,12 @@ TRANSCRIPT_ALIASES: list[tuple[str, str]] = [
     (r"\b(ba ?sigh|ba ?say|bas ?eye|bassai|basai|basa|b ?a ?s ?a ?i)\b", "BASAI"),
     (r"\b(em ?s ?a ?i|m ?s ?a ?i|msai|ms ?ai|em ?sai)\b", "MSAI"),
     (r"\b(c ?s ?d ?s|csds|see ?s ?d ?s)\b", "CSDS"),
-    (r"\b(richie|reach ?he|reach ?ee|ritchie)\b", "Reachy"),
+    # "Reachy" is the hardware's name and people use it to address him, but
+    # the model only knows he is Lancer. "Reachy, go to sleep" got "Oh, is
+    # Reachy one of the other robots around here? I hope they get good
+    # recharge sleep" -- twice -- and he stayed up. Said to him, it is his name.
+    # "Reachy Mini" is the robot model, so that is left as it is.
+    (r"\b(reachy|reachie|richie|reach ?he|reach ?ee|ritchie)\b(?!\s+mini)", "Lancer"),
     # Whisper does not know the name "Lancer" and reliably lands somewhere near
     # it. Three real transcripts from one test session: "Mancer Belt", "Answer
     # Bot", "Lancer Belt" -- so the wake word never matched and every command
@@ -2439,6 +2444,13 @@ _PREFETCH: list[tuple[object, str, dict]] = [
                  r"|\bhot\s+(out|outside|today)\b|\bcold\s+(out|outside|today)\b"
                  r"|\bjacket\b|\bumbrella\b|\bsunny\b", _re.I),
      "weather", {}),
+    # Going to sleep is a command with one right answer, so it is not left to
+    # the model to decide whether to call the skill. Twice it chose to chat
+    # about sleep instead, and he stayed awake in front of everyone.
+    (_re.compile(r"\b(go|get|head|back) to (sleep|bed)\b|\btake a nap\b"
+                 r"|\bnap time\b|\btime (to|for) (sleep|bed)\b|\bpower down\b",
+                 _re.I),
+     "rest", {"action": "sleep"}),
     # Something on one side: "look at the TV to your right". These turn once
     # and look, rather than sweeping the whole room -- the sweep took twenty
     # seconds for this and spent four of its five frames somewhere else. They
