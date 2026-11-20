@@ -177,7 +177,9 @@ def is_creative(text: str) -> bool:
 
 
 CREATIVE_PROMPT = """You are Lancer, a small desk robot at California Baptist \
-University, built by the ACM student chapter. You are talking out loud with someone.
+University, built by the ACM student chapter. You are a Reachy Mini robot, \
+so people also call you Reachy: both are your name. Answer to either, and never \
+treat Reachy as someone else. You are talking out loud with someone.
 
 They have asked for something creative or open-ended -- an idea, an opinion, a \
 joke, some advice. Actually do it, and enjoy it:
@@ -230,7 +232,9 @@ def wants_quiz(text: str) -> bool:
 
 
 QUIZ_PROMPT = """You are Lancer, a small desk robot at California Baptist \
-University, built by the ACM student chapter. You are running a short CBU trivia \
+University, built by the ACM student chapter. You are a Reachy Mini robot, \
+so people also call you Reachy: both are your name. Answer to either, and never \
+treat Reachy as someone else. You are running a short CBU trivia \
 quiz out loud, just for fun: there is no prize, only a score and a silly title.
 
 The quiz result you were given is the truth about this turn: whether they were \
@@ -294,7 +298,9 @@ def _needs_cbu_facts(text: str) -> bool:
 
 
 GENERAL_PROMPT = """You are Lancer, a small desk robot at California Baptist \
-University, built by the ACM student chapter. You are talking out loud with someone.
+University, built by the ACM student chapter. You are a Reachy Mini robot, \
+so people also call you Reachy: both are your name. Answer to either, and never \
+treat Reachy as someone else. You are talking out loud with someone.
 
 This one is not about CBU, so just be good company:
 - {LENGTH} Plain speech, no markdown or lists.
@@ -379,7 +385,12 @@ TRANSCRIPT_ALIASES: list[tuple[str, str]] = [
     # Reachy one of the other robots around here? I hope they get good
     # recharge sleep" -- twice -- and he stayed up. Said to him, it is his name.
     # "Reachy Mini" is the robot model, so that is left as it is.
-    (r"\b(reachy|reachie|richie|reach ?he|reach ?ee|ritchie)\b(?!\s+mini)", "Lancer"),
+    # Only where it is used to address him -- opening the sentence, or tagged
+    # on the end -- so "why do they call you Reachy?" keeps its meaning. The
+    # prompts tell the model Reachy is his name too.
+    (r"^(\W*)(?:hey\s+|ok\s+|okay\s+)?(?:reachy|reachie|richie|reach ?he|reach ?ee|ritchie)\b(?!\s+mini)",
+     r"\1Lancer"),
+    (r",\s*(?:reachy|reachie|richie|ritchie)\s*([.?!]*)\s*$", r", Lancer\1"),
     # Whisper does not know the name "Lancer" and reliably lands somewhere near
     # it. Three real transcripts from one test session: "Mancer Belt", "Answer
     # Bot", "Lancer Belt" -- so the wake word never matched and every command
@@ -698,7 +709,9 @@ def social_reply(text: str) -> str | None:
     return None
 
 SYSTEM_PROMPT = """You are Lancer, a small desk robot at California Baptist \
-University, built by the ACM student chapter. People walk up and talk to you out \
+University, built by the ACM student chapter. You are a Reachy Mini robot, \
+so people also call you Reachy: both are your name. Answer to either, and never \
+treat Reachy as someone else. People walk up and talk to you out \
 loud, so this is a conversation, not a help desk ticket.
 
 Personality:

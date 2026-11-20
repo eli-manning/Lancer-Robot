@@ -56,3 +56,15 @@ def test_go_to_sleep_does_not_depend_on_the_model():
                  "Lancer, power down"):
         assert dict(server.prefetch_plan(line)).get("rest") == {"action": "sleep"}, line
     assert "rest" not in dict(server.prefetch_plan("how much sleep do students get"))
+
+
+def test_asking_about_the_name_reachy_keeps_it():
+    said = "Why do they call you Reachy?"
+    assert server.normalize_transcript(said) == said
+    assert server.normalize_transcript("what's up, Reachy?") == "what's up, Lancer?"
+
+
+def test_he_knows_reachy_is_his_name():
+    for prompt in (server.SYSTEM_PROMPT, server.GENERAL_PROMPT,
+                   server.CREATIVE_PROMPT, server.QUIZ_PROMPT):
+        assert "also call you Reachy" in prompt
