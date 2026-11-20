@@ -94,3 +94,20 @@ def test_gather_refuses_a_tool_it_did_not_offer(monkeypatch):
     assert ran == [], "a withheld skill must not run"
     assert calls and calls[0]["skill"] == "look"
     assert calls[0]["result"]["ok"] is False
+
+
+def test_one_side_turns_that_way_instead_of_sweeping():
+    # "To your right" swept the whole room, ran out of time, and saw nothing.
+    for line, side in (("Lancer, look at the TV. To your right.", "right"),
+                       ("what's on the screen on your right?", "right"),
+                       ("look right", "right"),
+                       ("can you see the whiteboard to your left", "left"),
+                       ("look over left", "left")):
+        assert plan(line).get("look") == {"direction": side}, line
+
+
+def test_right_now_is_not_a_direction():
+    # "right now" must not turn the head.
+    assert plan("how many people are here right now").get("look") == {
+        "survey": True}
+    assert "look" not in plan("what time is it right now")

@@ -1,6 +1,6 @@
 {
   "name": "look",
-  "description": "Look through your camera and describe what you actually see. Use it whenever someone asks what you can see, who is there, what they are holding or wearing, what is written on something, or anything about the room. Set survey to true for questions about the room as a whole -- how many people are here, what is around you, what is behind you, is anyone else here -- and you will turn your head and take in the whole space instead of answering from one forward glance. Never guess at any of this without calling this first: you cannot see anything until you do.",
+  "description": "Look through your camera and describe what you actually see. Use it whenever someone asks what you can see, who is there, what they are holding or wearing, what is written on something, or anything about the room. Set survey to true for questions about the room as a whole -- how many people are here, what is around you, what is behind you, is anyone else here -- and you will turn your head and take in the whole space instead of answering from one forward glance. Set direction to left or right when someone points you at something on one side -- 'what's on the TV to your right' -- and you will turn that way and look, which is quicker than a survey. Never guess at any of this without calling this first: you cannot see anything until you do.",
   "risk": "motion",
   "spoken_wait": "Let me take a look.",
   "parameters": {
@@ -12,8 +12,18 @@
       },
       "survey": {
         "type": "boolean",
-        "description": "True for anything about the room or space as a whole rather than what is straight ahead. Turns the head to take in the left, centre and right before answering. Slower, so leave it false for 'what am I holding'."
+        "description": "True for anything about the room or space as a whole rather than what is straight ahead. Turns the head to take in the left, centre and right before answering. Slower, and not for one thing on one side -- use direction for that, so leave it false for 'what am I holding'."
+      },
+      "direction": {
+        "type": "string",
+        "enum": [
+          "ahead",
+          "left",
+          "right"
+        ],
+        "description": "Which way to turn before looking, from your own point of view. Use it for one thing on one side ('look at the TV on your right'); leave it out or 'ahead' for what is in front of you. Ignored when survey is true."
       }
     }
-  }
+  },
+  "min_timeout": 45
 }

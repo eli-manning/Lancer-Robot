@@ -1062,8 +1062,13 @@ def contextualize(query: str, history: list[dict]) -> str:
 # These checks are cheap and deterministic, so the claim has to be in the text.
 
 _NUM_RE = _re.compile(r"\b\d[\d,]*(?:\.\d+)?\b")
+# The middle initial may not run into lowercase letters. Without that, the
+# "G" of "Dr. Dan Grissom" was taken as an initial and the match stopped at
+# "Dr. Dan G" -- so the surname checked against the source was "g", which is
+# never there, and every answer naming a titled professor was blocked as
+# invented, true or not.
 _NAME_RE = _re.compile(
-    r"\b(?:Dr|Prof|Professor|President|Dean|Chair)\.?\s+[A-Z][a-z]+(?:\s+[A-Z]\.?)?"
+    r"\b(?:Dr|Prof|Professor|President|Dean|Chair)\.?\s+[A-Z][a-z]+(?:\s+[A-Z]\.?(?![a-z]))?"
     r"(?:\s+[A-Z][a-z]+)*|\b[A-Z][a-z]+\s+[A-Z][a-z]+,\s*(?:PhD|Ph\.D|DBA|EdD|MD)\b"
 )
 # Numbers that are safe to say without appearing verbatim in the source.
@@ -1212,7 +1217,9 @@ async def _process_query(query: str, history: list[dict] = []) -> tuple[str, lis
                     + ", ".join(map(str, bad[:5]))
                     + ". Answer again using only what the context states. Do not "
                     "give a figure or a name the context does not contain -- say "
-                    "you do not have that detail instead."
+                    "you do not have that detail instead. Reply with only the new "
+                    "answer, exactly as you would say it aloud to the person -- no "
+                    "apology and no mention of this correction or of 'the context'."
                 ),
             })
             answer = _generate(messages, {"temperature": 0.0})
@@ -2301,6 +2308,16 @@ _PREFETCH: list[tuple[object, str, dict]] = [
                  r"|\bhot\s+(out|outside|today)\b|\bcold\s+(out|outside|today)\b"
                  r"|\bjacket\b|\bumbrella\b|\bsunny\b", _re.I),
      "weather", {}),
+    # Something on one side: "look at the TV to your right". These turn once
+    # and look, rather than sweeping the whole room -- the sweep took twenty
+    # seconds for this and spent four of its five frames somewhere else. They
+    # come before the survey rule so "look around to your right" turns right.
+    (_re.compile(r"\b(to|on|at)\s+(your|the)\s+right\b|\blook\s+(over\s+)?right\b"
+                 r"|\bturn\s+(to\s+the\s+|to\s+your\s+)?right\s+and\s+look\b", _re.I),
+     "look", {"direction": "right"}),
+    (_re.compile(r"\b(to|on|at)\s+(your|the)\s+left\b|\blook\s+(over\s+)?left\b"
+                 r"|\bturn\s+(to\s+the\s+|to\s+your\s+)?left\s+and\s+look\b", _re.I),
+     "look", {"direction": "left"}),
     # Anything about the room as a whole. A single forward frame covers maybe a
     # third of a room, so these get the head sweep -- and they are prefetched
     # rather than left to the model because the failure mode is not silence, it

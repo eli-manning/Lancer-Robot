@@ -99,6 +99,15 @@ class Skill:
         # case: waiting for the head to finish moving before saying a word is
         # what makes the robot feel like it takes turns with itself.
         self.concurrent: bool = bool(manifest.get("concurrent"))
+        # A floor on this skill's timeout. The configured timeout suits a web
+        # lookup; a camera sweep that physically turns the robot five times and
+        # then sends every view to a vision model cannot finish inside it, and
+        # raising the global setting would let every slow lookup stall a reply.
+        self.min_timeout: int = int(manifest.get("min_timeout") or 0)
+
+    @property
+    def timeout(self) -> int:
+        return max(_skill_timeout(), self.min_timeout)
 
     @property
     def tool_schema(self) -> dict:
@@ -133,13 +142,19 @@ class Skill:
                 input=json.dumps(arguments or {}),
                 capture_output=True,
                 text=True,
-                timeout=_skill_timeout(),
+                timeout=self.timeout,
                 cwd=str(self.path),
             )
         except subprocess.TimeoutExpired:
             logger.warning("Skill %s timed out after %ss",
-                           self.name, _skill_timeout())
-            return {"ok": False, "error": "timeout"}
+                           self.name, self.timeout)
+            # Said plainly, because a bare "timeout" let the model invent a
+            # reason ("maybe I blinked") for what was really just running out
+            # of time.
+            return {"ok": False, "error": (
+                f"timeout: {self.name} ran out of time after {self.timeout}s "
+                "and was stopped before it finished. Say that it took too long, "
+                "not that it worked or saw nothing.")}
 
         elapsed = time.monotonic() - started
         if proc.returncode != 0:

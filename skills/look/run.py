@@ -30,18 +30,36 @@ SERVER = os.environ.get("LANCER_SERVER_SELF", "http://127.0.0.1:7870")
 # room. Measured on the hardware: a full three-radian swing completes in about
 # two and a half seconds, so this costs seconds rather than the minute a
 # cautious guess would have budgeted.
-# (body yaw, head yaw) for each look. The base stops at about 113 degrees each
-# way; adding the neck's 35 at the two extremes reaches past that, so the pair
-# together sweeps roughly 285 degrees of aim. With the camera's own field of
-# view on top, that is the whole room -- there is no blind spot worth the extra
-# seconds it would cost to cover.
+# (body yaw, head offset) for each look, far left to far right. The offset is
+# measured from the body, not the room: the daemon takes head yaw in the world
+# frame, so the head's actual target is body yaw + offset (see _aim). Sending
+# the offset straight through asked the head to keep facing the room's front,
+# and the neck counter-rotated against every body turn -- the body swung right
+# while the camera stayed staring ahead, and the survey saw one view five times.
+# The base stops at about 113 degrees each way; the neck's 35 on top at the two
+# extremes reaches past that, so the pair sweeps roughly 285 degrees of aim.
 SWEEP = ((1.85, 0.6), (1.0, 0.0), (0.0, 0.0), (-1.0, 0.0), (-1.85, -0.6))
+# One deliberate turn for "what is to your right". A five-stop survey for that
+# costs twenty seconds and spends four of its five frames somewhere else.
+# Positive yaw is to the robot's left, as in SWEEP.
+DIRECTIONS = {
+    "left": ((1.1, 0.35),),
+    "right": ((-1.1, -0.35),),
+    "ahead": (),
+}
 BODY_LIMIT = 1.9
 HEAD_LIMIT = 0.65
 MOVE_SECONDS = 1.2
 # The app posts a frame about once a second, so a shorter wait than this hands
 # the model the previous angle's picture and the survey silently sees nothing new.
 SETTLE_SECONDS = 1.1
+# Pitch for a deliberate look, a little above level (negative is up): eye
+# height for someone standing at the desk and for a screen on the wall. The
+# head's pitch at the moment of asking is whatever face tracking last left it
+# at, and turning with that kept a robot that had been looking up at someone
+# photographing the ceiling from every angle. Roll goes to zero for the same
+# reason.
+LOOK_PITCH = -0.15
 
 PROMPT = (
     "You are looking through your own camera, as a small desk robot. "
@@ -71,9 +89,40 @@ def _frame() -> bytes | None:
     return response.content if response.ok and response.content else None
 
 
-def _sweep() -> list[bytes]:
+def _aim(rest_pose: dict, body_yaw: float, head_offset: float) -> dict:
+    """The goto payload that points the camera at body_yaw + head_offset."""
+    body = max(-BODY_LIMIT, min(BODY_LIMIT, body_yaw))
+    head = {k: rest_pose.get(k, 0.0) for k in ("x", "y", "z")}
+    head["roll"] = 0.0
+    head["pitch"] = LOOK_PITCH
+    # World frame: the head's yaw has to include the body's turn, or the
+    # kinematics hold the camera on the room's front.
+    head["yaw"] = body + max(-HEAD_LIMIT, min(HEAD_LIMIT, head_offset))
+    return {"body_yaw": body, "head_pose": head, "duration": MOVE_SECONDS}
+
+
+def _pin_robot_address() -> None:
     """
-    Look left, centre and right, keeping a frame from each.
+    Resolve the daemon once and put it first for the rest of this run.
+
+    Every robot call re-resolves the address once lancer_net's twenty-second
+    cache lapses, which a sweep outlasts -- and with the USB link unplugged
+    each re-resolve waited out the dead 10.5.1.1 probe before trying Tailscale.
+    """
+    try:
+        import lancer_net
+
+        base = lancer_net.base()
+        if base:
+            os.environ["LANCER_ROBOT"] = base
+    except Exception:
+        pass
+
+
+def _look_around(stops) -> list[bytes]:
+    """
+    Turn to each (body yaw, head offset) stop, keeping a frame from each, then
+    turn back to where he was facing.
 
     Tracking is switched off for the duration for the same reason the sleep
     sequence does it: the daemon's face tracker and this are both steering the
@@ -81,8 +130,8 @@ def _sweep() -> list[bytes]:
     """
     # Two things steer this head: the daemon's face tracker and the app's own
     # aiming loop. Disabling only the first left the second pulling the head
-    # back between steps, so a commanded 35 degrees arrived as 22 and drifted
-    # home. The hold rides the app's heartbeat, so give it a beat to land.
+    # back between steps. The hold rides the app's heartbeat, so give it a
+    # beat to land.
     try:
         requests.post(f"{SERVER}/api/hold", json={"seconds": 30}, timeout=5)
         time.sleep(1.1)
@@ -98,13 +147,8 @@ def _sweep() -> list[bytes]:
     robot_post("/api/media/tracking/disable", timeout=6)
     frames: list[bytes] = []
     try:
-        for body_yaw, head_yaw in SWEEP:
-            head = {k: rest_pose.get(k, 0.0)
-                    for k in ("x", "y", "z", "roll", "pitch")}
-            head["yaw"] = max(-HEAD_LIMIT, min(HEAD_LIMIT, head_yaw))
-            robot_post("/api/move/goto",
-                       {"body_yaw": max(-BODY_LIMIT, min(BODY_LIMIT, body_yaw)),
-                        "head_pose": head, "duration": MOVE_SECONDS},
+        for body_yaw, head_offset in stops:
+            robot_post("/api/move/goto", _aim(rest_pose, body_yaw, head_offset),
                        timeout=10)
             time.sleep(MOVE_SECONDS + SETTLE_SECONDS)
             jpeg = _frame()
@@ -112,10 +156,12 @@ def _sweep() -> list[bytes]:
                 frames.append(jpeg)
     finally:
         # Always turn back to where he was facing and hand tracking over again,
-        # even if a move failed -- otherwise he is left staring at a wall.
+        # even if a move failed -- otherwise he is left staring at a wall. The
+        # head goes back to the pose it had, which is already in the world
+        # frame, so it lines up with the body it started on.
         home = {k: rest_pose.get(k, 0.0)
                 for k in ("x", "y", "z", "roll", "pitch")}
-        home["yaw"] = 0.0
+        home["yaw"] = float(rest_pose.get("yaw", started_at) or 0.0)
         home_seconds = MOVE_SECONDS + 0.6
         robot_post("/api/move/goto",
                    {"body_yaw": started_at, "head_pose": home,
@@ -149,7 +195,13 @@ def main() -> int:
                               "model. Switch to Gemini or Anthropic."})
 
     survey = bool(args.get("survey"))
-    frames = _sweep() if survey else [f for f in (_frame(),) if f]
+    direction = str(args.get("direction") or "").strip().lower()
+    stops = SWEEP if survey else DIRECTIONS.get(direction, ())
+    if stops:
+        _pin_robot_address()
+        frames = _look_around(stops)
+    else:
+        frames = [f for f in (_frame(),) if f]
     if not frames:
         return _out({"ok": False,
                      "error": "no camera frame right now -- the robot app may "
@@ -157,6 +209,8 @@ def main() -> int:
 
     question = str(args.get("question") or "").strip()
     ask = PROMPT + (SURVEY_NOTE if len(frames) > 1 else "")
+    if not survey and direction in ("left", "right"):
+        ask += f" You have turned to look to your {direction}."
     if question:
         ask += f"\n\nThe person asked: {question}"
     try:
@@ -166,7 +220,7 @@ def main() -> int:
         return _out({"ok": False, "error": f"could not look: {e}"[:220]})
 
     return _out({"ok": True, "seen": seen, "views": len(frames),
-                 "surveyed": survey,
+                 "surveyed": survey, "direction": direction or "ahead",
                  "detail": "This is what you can actually see right now. "
                            "Say it in your own voice; do not add details that "
                            "are not in it."})
