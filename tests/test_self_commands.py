@@ -68,3 +68,9 @@ def test_he_knows_reachy_is_his_name():
     for prompt in (server.SYSTEM_PROMPT, server.GENERAL_PROMPT,
                    server.CREATIVE_PROMPT, server.QUIZ_PROMPT):
         assert "also call you Reachy" in prompt
+
+
+def test_what_are_you_doing_is_not_an_introduction():
+    assert server.social_reply("Lancer, what are you doing?") is None or \
+        "I'm Lancer. I'm a Reachy Mini" not in server.social_reply("Lancer, what are you doing?")
+    assert "Reachy Mini" in server.social_reply("what are you?")

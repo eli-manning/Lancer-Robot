@@ -143,3 +143,15 @@ def test_the_name_said_before_picks_the_surname(corpus):
     # follows "Van" anywhere in the documents.
     assert server.repair_proper_nouns("who is Philip Van Hooster") == \
         "who is Philip Van Haaster"
+
+
+@pytest.mark.parametrize("asked", [
+    "Do you know who Dr. Grissom is?",
+    "who is Grissom",
+    "Tell me about Dr. Grissom",
+])
+def test_a_surname_the_documents_know_is_answered_from_them(corpus, asked):
+    # Scored just under the floor and discarded, so he described Gil Grissom
+    # from CSI instead of the department chair.
+    _context, sources, relevant, _score = server.retrieve_or_repair(asked)
+    assert relevant, asked

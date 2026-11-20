@@ -335,7 +335,9 @@ SOCIAL_REPLIES: list[tuple[str, str]] = [
      "Over here? Got it. What do you need?"),
     (r"\b((stop|quit) (talking|it)|be quiet|shut up|never ?mind|forget it)\b",
      "Fine. I'll be here."),
-    (r"\b(who are you|what are you|your name|who is lancer|who is reachy"
+    # "what are you" only on its own: "Lancer, what are you doing?" got the
+    # whole self-introduction.
+    (r"\b(who are you|what are you(?=\s*[?.!]*\s*$)|your name|who is lancer|who is reachy"
      r"|are you (reachy|lancer)|call you (reachy|lancer))\b",
      "I'm Lancer. I'm a Reachy Mini, so Reachy works too -- I answer to both. "
      "The ACM chapter built me, and I know CBU's programs and the CBU "
@@ -939,6 +941,33 @@ def _drop_reason(doc, docs, candidates, scores, best_score, lookup, cfg) -> str:
     return "not selected"
 
 
+# How far under the relevance floor a chunk may score and still count, when the
+# person asked about is named in it. Bounded so a name alone cannot drag in a
+# chunk that is about something else entirely.
+NAME_RELEVANCE_MARGIN = 4.0
+
+
+def _named_in_top_chunk(query: str, docs: list[str]) -> str:
+    """A name from the question that the corpus knows and the top chunk says."""
+    if not docs or not _proper_nouns:
+        return ""
+    top = docs[0].lower()
+    # Surnames only: the last word of each run of capitalised words. A first
+    # name is weak evidence -- "Philip Van Hoster" must not count as found
+    # because some chunk mentions a Philip.
+    runs = _re.findall(r"(?:\b[A-Z][a-zA-Z'’-]*\.?\s+)*\b[A-Z][a-zA-Z'’-]{4,}\b",
+                       query or "")
+    for run in runs:
+        word = run.split()[-1]
+        lowered = word.lower()
+        if (lowered in _proper_nouns and lowered not in _STOPWORDS
+                and lowered not in _PROTECTED_WORDS
+                and lowered not in WAKE_WORDS
+                and _re.search(rf"\b{_re.escape(lowered)}\b", top)):
+            return word
+    return ""
+
+
 def retrieve(query: str) -> tuple[str, list[str], bool, float | None]:
     """
     Hybrid retrieval: dense + BM25, combined with Reciprocal Rank Fusion.
@@ -983,6 +1012,17 @@ def retrieve(query: str) -> tuple[str, list[str], bool, float | None]:
 
     sources = [lookup[doc].get("source", "unknown") for doc in docs]
     relevant = best_score is None or best_score >= float(cfg["relevance_min"])
+    named = _named_in_top_chunk(query, docs)
+    if (not relevant and named and best_score is not None
+            and best_score >= float(cfg["relevance_min"]) - NAME_RELEVANCE_MARGIN):
+        # "Do you know who Dr. Grissom is?" found Dan Grissom's faculty entry
+        # first and scored it -2.77 against a -2 floor, so it was thrown away
+        # and the model answered from television: Gil Grissom, CSI's forensic
+        # entomologist. When the person named is in the top chunk by name, the
+        # chunk is about them, whatever the reranker thinks of the phrasing.
+        logger.info("Kept retrieval: %s is named in the top chunk (%.2f)",
+                    named, best_score)
+        relevant = True
 
     # Everything the ranking decided, kept for the debug view. Retrieval is the
     # part of this system most often blamed and least often inspected: without
@@ -1817,8 +1857,16 @@ def stream_sentences(model: str, messages: list[dict], options: dict):
                 break
             yield buffer[:cut].strip()
             buffer = buffer[cut:].lstrip()
-    if buffer.strip():
-        yield buffer.strip()
+    tail = buffer.strip()
+    if tail:
+        # A stream the provider cut off ends in a fragment ("...take it to
+        # Michigan in"). Speaking it sounds like he died mid-sentence; ending
+        # on the last whole sentence sounds finished.
+        if (provider == llm.GEMINI and llm.last_finish_reason == "MAX_TOKENS"
+                and not _ends_sentence(tail)):
+            logger.info("Dropped a cut-off fragment: %r", tail[-60:])
+            return
+        yield tail
 
 
 # Single robot, single conversation -- module-level history is sufficient.

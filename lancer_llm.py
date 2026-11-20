@@ -51,7 +51,28 @@ SUGGESTED_MODELS = {
 # Short answers said out loud. Not a cost measure: the sentence limit downstream
 # throws away anything past a few sentences anyway, so generating more is time
 # somebody spends waiting for words that get discarded.
-MAX_OUTPUT_TOKENS = 1024
+MAX_OUTPUT_TOKENS = 2048
+
+# Gemini 2.5 Flash thinks before it answers, and those hidden tokens count
+# against maxOutputTokens. On grounded CBU answers it was spending 800-980 of
+# a 1024 budget thinking, and the spoken answer stopped wherever the budget ran
+# out: "...the team plans to take it to Michigan in". Answers here are a few
+# grounded sentences read aloud, so thinking is switched off -- which is also
+# faster. Only 2.5 Flash is touched: other models name the setting
+# differently or refuse a zero budget.
+THINKING_BUDGET = 0
+
+
+def _thinking_config(model: str) -> dict:
+    name = (model or "").lower()
+    if "2.5-flash" in name:
+        return {"thinkingConfig": {"thinkingBudget": THINKING_BUDGET}}
+    return {}
+
+
+# Why the most recent Gemini stream ended. "MAX_TOKENS" means the last words
+# are a fragment, so the caller should not speak them as if they were whole.
+last_finish_reason: str = ""
 
 ENV_KEYS = {
     ANTHROPIC: "ANTHROPIC_API_KEY",
@@ -273,13 +294,14 @@ def _gemini_contents(messages: list[dict]) -> tuple[str, list[dict]]:
 
 
 def _gemini_body(messages: list[dict], options: dict,
-                 tools: list[dict] | None = None) -> dict:
+                 tools: list[dict] | None = None, model: str = "") -> dict:
     system, contents = _gemini_contents(messages)
     body: dict = {
         "contents": contents,
         "generationConfig": {
             "maxOutputTokens": MAX_OUTPUT_TOKENS,
             "temperature": float(options.get("temperature", 0.4)),
+            **_thinking_config(model),
         },
     }
     if system:
@@ -332,7 +354,7 @@ def _gemini_chat(messages: list[dict], model: str, tools: list[dict],
 
     response = requests.post(
         _gemini_url(model, "generateContent"),
-        json=_gemini_body(messages, options, tools), timeout=60,
+        json=_gemini_body(messages, options, tools, model), timeout=60,
         headers={"x-goog-api-key": key})
     if not response.ok:
         raise RuntimeError(
@@ -431,7 +453,9 @@ def _stream_gemini(messages: list[dict], model: str,
     # The same conversion the tool phase uses, so a conversation that already
     # contains tool calls and their results streams with those intact rather
     # than flattened into prose.
-    body = _gemini_body(messages, options)
+    global last_finish_reason
+    last_finish_reason = ""
+    body = _gemini_body(messages, options, model=model)
     url = _gemini_url(model, "streamGenerateContent") + "?alt=sse"
 
     with requests.post(url, json=body, timeout=120, stream=True,
@@ -450,10 +474,14 @@ def _stream_gemini(messages: list[dict], model: str,
             except json.JSONDecodeError:
                 continue
             for candidate in frame.get("candidates", []):
+                if candidate.get("finishReason"):
+                    last_finish_reason = candidate["finishReason"]
                 for part in candidate.get("content", {}).get("parts", []):
                     text = part.get("text")
                     if text:
                         yield text
+    if last_finish_reason and last_finish_reason != "STOP":
+        logger.warning("Gemini stream ended early: %s", last_finish_reason)
 
 
 def describe_image(jpeg: bytes, question: str, model: str, provider: str,
@@ -493,7 +521,8 @@ def describe_images(jpegs: list[bytes], question: str, model: str,
             "contents": [{"role": "user", "parts": parts}],
             "generationConfig": {"maxOutputTokens": MAX_OUTPUT_TOKENS,
                                  "temperature": float(
-                                     options.get("temperature", 0.4))},
+                                     options.get("temperature", 0.4)),
+                                 **_thinking_config(model)},
         }
         response = requests.post(_gemini_url(model, "generateContent"), json=body,
                                  timeout=60, headers={"x-goog-api-key": key})
