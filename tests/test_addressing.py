@@ -203,3 +203,20 @@ def test_commands_get_an_instant_reply(command, expected):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_whisper_loops_are_noise_not_questions():
+    loop = ("Or what's the call? Or what's the call? Or what's the call? "
+            "Or what's the call? Or is the conversation the rainbow or something?")
+    ok, why = server.is_addressed(loop, True, mode="ambient")
+    assert not ok and "loop" in why
+    ok, _ = server.is_addressed("Lancer, Lancer, Lancer, Lancer", True,
+                                mode="ambient")
+    assert not ok
+
+
+def test_real_questions_still_get_through():
+    for line in ("What programs does CBU offer?",
+                 "Lancer, what's on the TV?",
+                 "No, no, what's the dean's name?"):
+        assert not server.is_transcription_loop(line), line

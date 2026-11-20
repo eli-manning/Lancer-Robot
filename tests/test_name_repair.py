@@ -135,3 +135,11 @@ def test_lancer_no_longer_claims_it_cannot_dance():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_the_name_said_before_picks_the_surname(corpus):
+    # With the SAE rulebook indexed, "Hooster" is spelled closer to the tire
+    # brand "Hoosier" and to "Choose" than to "Haaster" -- but only "Haaster"
+    # follows "Van" anywhere in the documents.
+    assert server.repair_proper_nouns("who is Philip Van Hooster") == \
+        "who is Philip Van Haaster"

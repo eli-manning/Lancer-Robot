@@ -29,6 +29,7 @@ EMBED_DOC_PREFIX = "search_document: "
 CHUNK_SIZE = 220           # words -- smaller chunks retrieve far more precisely
 CHUNK_OVERLAP = 40
 MIN_CHUNK_WORDS = 20
+EMBED_MAX_CHARS = 6000      # comfortably inside nomic-embed-text's context
 CHROMA_HOST = "localhost"
 CHROMA_PORT = 8001
 
@@ -92,7 +93,7 @@ def _split_paragraphs(text: str) -> list[str]:
     return parts or [text.strip()]
 
 
-def chunk_text(text: str, source: str) -> list[dict]:
+def chunk_text(text: str, source: str, title: str | None = None) -> list[dict]:
     """
     Chunk on paragraph boundaries, packing up to CHUNK_SIZE words.
 
@@ -100,7 +101,7 @@ def chunk_text(text: str, source: str) -> list[dict]:
     two chunks and neither retrieves well. Every chunk also carries the document
     title so an isolated passage still says what it belongs to.
     """
-    title = _title_for(source)
+    title = title or _title_for(source)
     paragraphs = _split_paragraphs(text)
 
     chunks: list[dict] = []
@@ -140,8 +141,12 @@ def chunk_text(text: str, source: str) -> list[dict]:
 def embed_and_store(chunks: list[dict]):
     for chunk in chunks:
         doc_id = hashlib.md5(chunk["text"].encode()).hexdigest()
+        # The embedder has a fixed context; the stored text stays whole, only
+        # what is embedded is capped. Word-count chunking cannot see a chunk
+        # whose "words" are tables or runs of symbols.
         embedding = ollama.embeddings(
-            model=EMBED_MODEL, prompt=EMBED_DOC_PREFIX + chunk["text"]
+            model=EMBED_MODEL,
+            prompt=EMBED_DOC_PREFIX + chunk["text"][:EMBED_MAX_CHARS],
         )["embedding"]
         collection.upsert(
             ids=[doc_id],
@@ -156,28 +161,90 @@ def embed_and_store(chunks: list[dict]):
     print(f"  Stored {len(chunks)} chunks.")
 
 
-def scrape_url(url: str):
+def _fetch_html(url: str) -> str:
+    """
+    The page as text, decoded correctly.
+
+    A server that sends text/html without a charset gets ISO-8859-1 from
+    requests, per the old HTTP default -- and a UTF-8 page read that way stores
+    "±" as "Â±" and every dash as "â". Prefer what the bytes say.
+    """
+    resp = requests.get(url, timeout=20, headers={"User-Agent": "CBU-Bot/1.0"})
+    resp.raise_for_status()
+    if "charset" not in resp.headers.get("content-type", "").lower():
+        resp.encoding = resp.apparent_encoding or "utf-8"
+        if resp.encoding.lower() in ("ascii", "iso-8859-1", "windows-1252"):
+            resp.encoding = "utf-8"
+    return resp.text
+
+
+def _replace_source(url: str) -> None:
+    """
+    Drop what is already stored for this page before storing it again.
+
+    Chunk IDs are hashes of the chunk text, so re-scraping a page whose text
+    changed -- or was decoded differently -- added new chunks next to the old
+    ones instead of replacing them.
+    """
+    try:
+        collection.delete(where={"source": url})
+    except Exception as e:
+        print(f"  Could not clear old chunks for {url}: {e}")
+
+
+def scrape_url(url: str, sections: bool = False, label: str | None = None):
+    """
+    Scrape one page into the collection, replacing what it stored before.
+
+    With sections, every <section> becomes its own run of chunks headed
+    "<label> -- <section heading>". A long single-page site chunked as one
+    stream produces passages like "The leads: Christopher Petrov, President..."
+    that never say whose leads they are, and a list of names with no owner
+    outranks the real answer to "who is <someone>".
+    """
     print(f"Scraping: {url}")
     try:
-        resp = requests.get(url, timeout=10, headers={"User-Agent": "CBU-Bot/1.0"})
-        soup = BeautifulSoup(resp.text, "html.parser")
-        for tag in soup(["script", "style", "nav", "footer", "header"]):
+        soup = BeautifulSoup(_fetch_html(url), "html.parser")
+        for tag in soup(["script", "style", "nav", "footer", "header",
+                         "form", "noscript", "svg"]):
             tag.decompose()
-        text = soup.get_text(separator=" ", strip=True)
-        chunks = chunk_text(text, source=url)
+        _replace_source(url)
+        if not sections:
+            text = soup.get_text(separator=" ", strip=True)
+            chunks = chunk_text(text, source=url, title=label)
+        else:
+            page = label or (soup.title.get_text(strip=True) if soup.title
+                             else _title_for(url))
+            chunks = []
+            heading = ""
+            for section in soup.find_all("section"):
+                h = section.find(["h1", "h2", "h3"])
+                if h:
+                    heading = h.get_text(" ", strip=True)
+                body = section.get_text(separator=" ", strip=True)
+                if len(body.split()) < MIN_CHUNK_WORDS:
+                    continue
+                title = f"{page} -- {heading}" if heading else page
+                chunks.extend(chunk_text(body, source=url, title=title))
         embed_and_store(chunks)
         time.sleep(0.5)
     except Exception as e:
         print(f"  Error: {e}")
 
 
-def ingest_pdf(pdf_path: str):
+def ingest_pdf(pdf_path: str, label: str | None = None):
     try:
         import pymupdf
         print(f"Ingesting PDF: {pdf_path}")
         doc = pymupdf.open(pdf_path)
         text = " ".join(page.get_text() for page in doc)
-        chunks = chunk_text(text, source=pdf_path)
+        # Table-of-contents dot leaders ("Cockpit ......... 55") are one
+        # "word" hundreds of characters long, so a chunk packed by word count
+        # blew past the embedding model's context and the whole PDF failed.
+        text = re.sub(r"(?:\s?[.\u2026·]){4,}", " ", text)
+        _replace_source(pdf_path)
+        title = f"{label} -- {_title_for(pdf_path)}" if label else None
+        chunks = chunk_text(text, source=pdf_path, title=title)
         embed_and_store(chunks)
     except ImportError:
         print("Install pymupdf: pip install pymupdf")
@@ -239,6 +306,10 @@ def ingest_directory(dir_path: str, skip_exts: tuple[str, ...] = ()):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", help="Single URL to scrape")
+    parser.add_argument("--sections", action="store_true",
+                        help="With --url: chunk each <section> on its own")
+    parser.add_argument("--label",
+                        help="With --url or --pdf: heading to put on every chunk")
     parser.add_argument("--seed", action="store_true", help="Scrape all seed URLs")
     parser.add_argument("--pdf", help="PDF to ingest")
     parser.add_argument("--dir", help="Directory of docs to ingest")
@@ -251,12 +322,12 @@ if __name__ == "__main__":
         client.delete_collection("cbu_knowledge")
         print("Collection wiped.")
     elif args.url:
-        scrape_url(args.url)
+        scrape_url(args.url, sections=args.sections, label=args.label)
     elif args.seed:
         for url in CBU_SEED_URLS:
             scrape_url(url)
     elif args.pdf:
-        ingest_pdf(args.pdf)
+        ingest_pdf(args.pdf, label=args.label)
     elif args.dir:
         ingest_directory(args.dir, tuple(args.skip_ext))
     else:

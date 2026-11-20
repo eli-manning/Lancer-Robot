@@ -403,6 +403,9 @@ def normalize_transcript(text: str) -> str:
 # Names that appear in the documents, learned from the documents themselves.
 # Rebuilt whenever the lexical index is.
 _proper_nouns: set[str] = set()
+# (word, next word) for capitalised pairs in the corpus, so a repaired surname
+# can be checked against the first name actually said before it.
+_name_pairs: set[tuple[str, str]] = set()
 
 # Whisper hears a name it has never seen and writes something close. "Philip Van
 # Haaster" came through as "Philip Van Hoster", and that one syllable took the
@@ -433,19 +436,25 @@ _PROTECTED_WORDS = {
 
 def build_proper_nouns() -> int:
     """Collect capitalised words from the corpus to match transcripts against."""
-    global _proper_nouns
+    global _proper_nouns, _name_pairs
     found: set[str] = set()
+    pairs: set[tuple[str, str]] = set()
     for doc in _bm25_docs:
         for word in _re.findall(r"\b[A-Z][a-zA-Z'’-]{3,}\b", doc):
             lowered = word.lower()
             if lowered not in _STOPWORDS:
                 found.add(lowered)
+        # Two capitalised words in a row: "Van Haaster", "Dan Grissom".
+        for first, second in _re.findall(
+                r"\b([A-Z][a-zA-Z'’-]+)\s+(?=([A-Z][a-zA-Z'’-]{3,})\b)", doc):
+            pairs.add((first.lower(), second.lower()))
     _proper_nouns = found
+    _name_pairs = pairs
     logger.info("Learned %d proper nouns from the corpus", len(found))
     return len(found)
 
 
-def repair_proper_nouns(text: str) -> str:
+def repair_proper_nouns(text: str, choice: int = 0) -> str:
     """
     Rewrite a probable mis-heard name to the nearest one the documents contain.
 
@@ -470,11 +479,24 @@ def repair_proper_nouns(text: str) -> str:
             return word
         if lowered in _STOPWORDS or lowered in _PROTECTED_WORDS:
             return word
-        close = difflib.get_close_matches(lowered, _proper_nouns, n=1,
+        # `choice` picks the next-closest name instead of the closest. The
+        # nearest word is not always the right one: once the SAE spec sheet
+        # was indexed, "Hoster" sat as close to the tire brand "Hoosier" as to
+        # "Haaster", and the tire won.
+        close = difflib.get_close_matches(lowered, _proper_nouns, n=8,
                                           cutoff=_NAME_MATCH_CUTOFF)
-        if not close:
+        # Spelling alone is a weak signal once the corpus has a rulebook in it
+        # -- "Hooster" is nearer "Hoosier", "Choose" and "Hose" than "Haaster".
+        # The word said just before it is a strong one: the documents contain
+        # "Van Haaster" and never "Van Hose". Candidates that really follow the
+        # preceding word go first; spelling order is kept within each group.
+        before = match.string[:match.start()].split()
+        if before:
+            prev = before[-1].strip(",.!?").lower()
+            close.sort(key=lambda c: (prev, c) not in _name_pairs)
+        if len(close) <= choice:
             return word
-        repaired = close[0].capitalize()
+        repaired = close[choice].capitalize()
         logger.info("Repaired probable name %r -> %r", word, repaired)
         return repaired
 
@@ -539,6 +561,25 @@ _CHATTER_OPENERS = (
 )
 
 
+def is_transcription_loop(text: str) -> bool:
+    """
+    Whisper's tell for noise it could not make out: one phrase over and over.
+
+    "Or what's the call? Or what's the call? Or what's the call? Or what's the
+    call?" was question-shaped, a face was in view, and he answered it -- but
+    nobody said it. Real speech does not repeat a whole sentence three times.
+    """
+    parts = [_re.sub(r"[^a-z0-9' ]+", "", p).strip()
+             for p in _re.split(r"[.?!,;]+", (text or "").lower())]
+    parts = [p for p in parts if p]
+    if len(parts) < 3:
+        return False
+    counts: dict[str, int] = {}
+    for p in parts:
+        counts[p] = counts.get(p, 0) + 1
+    return max(counts.values()) >= 3
+
+
 def is_addressed(text: str, face_present: bool,
                  interrupted: bool = False, mode: str = "ambient",
                  attentive: bool = False,
@@ -557,6 +598,8 @@ def is_addressed(text: str, face_present: bool,
     decided by the caller from the clock.
     """
     lowered = text.strip().lower()
+    if is_transcription_loop(lowered):
+        return False, "transcription loop -- noise, not speech"
     if any(w in lowered for w in WAKE_WORDS):
         return True, "wake-word"
 
@@ -1034,20 +1077,30 @@ def retrieve_or_repair(query: str) -> tuple[str, list[str], bool, float | None]:
     if relevant:
         return context, sources, relevant, score
 
-    repaired = repair_proper_nouns(query)
-    if repaired == query:
-        return context, sources, relevant, score
-
-    logger.info("Retrieval missed; retrying with %r", repaired)
-    r_context, r_sources, r_relevant, r_score = retrieve(repaired)
-    improved = (r_relevant and r_score is not None
-                and r_score >= (score or -99.0) + _REPAIR_MIN_GAIN)
-    if improved:
-        logger.info("Name repair rescued the query (%.2f -> %.2f)",
-                    score if score is not None else float("nan"), r_score)
-        return r_context, r_sources, r_relevant, r_score
+    # A few candidates, nearest first, and the first one that clearly works is
+    # kept. Each still has to earn its place the same way, so trying more of
+    # them cannot turn an outside question into a campus answer -- it only
+    # stops a near-miss name in an unrelated document from blocking the right
+    # one.
+    tried: set[str] = {query}
+    for choice in range(_REPAIR_CANDIDATES):
+        repaired = repair_proper_nouns(query, choice)
+        if repaired in tried:
+            continue
+        tried.add(repaired)
+        logger.info("Retrieval missed; retrying with %r", repaired)
+        r_context, r_sources, r_relevant, r_score = retrieve(repaired)
+        improved = (r_relevant and r_score is not None
+                    and r_score >= (score or -99.0) + _REPAIR_MIN_GAIN)
+        if improved:
+            logger.info("Name repair rescued the query (%.2f -> %.2f)",
+                        score if score is not None else float("nan"), r_score)
+            return r_context, r_sources, r_relevant, r_score
 
     return context, sources, relevant, score
+
+
+_REPAIR_CANDIDATES = 3
 
 
 # "one" and "there" appear in ordinary questions ("year one", "is there a...")
