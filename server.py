@@ -35,6 +35,7 @@ import requests
 import lancer_llm as llm
 import lancer_net
 import lancer_memory as memory
+import lancer_quiz as quiz
 import lancer_runtime as rt
 import lancer_timers as timers
 import lancer_skills as skills
@@ -209,6 +210,42 @@ _SELF_COMMAND_RE = _re.compile(
 def is_self_command(text: str) -> bool:
     """Whether this asks the robot to do something rather than to know something."""
     return bool(_SELF_COMMAND_RE.search(text or ""))
+
+
+# Asking for the quiz. "Quiz me on CBU" has CBU in it, so left alone it goes
+# to retrieval, which has nothing to say about a game.
+_QUIZ_START_RE = _re.compile(
+    r"\b(quiz|trivia|test me|test my knowledge)\b",
+    _re.I,
+)
+
+
+# Seconds to keep listening for an answer after a quiz question is asked.
+QUIZ_ANSWER_WINDOW = 25.0
+
+
+def wants_quiz(text: str) -> bool:
+    """Whether this asks to be quizzed."""
+    return bool(_QUIZ_START_RE.search(text or ""))
+
+
+QUIZ_PROMPT = """You are Lancer, a small desk robot at California Baptist \
+University, built by the ACM student chapter. You are running a short CBU trivia \
+quiz out loud, just for fun: there is no prize, only a score and a silly title.
+
+The quiz result you were given is the truth about this turn: whether they were \
+right, the real answer, the score, and the next question. You do not grade \
+anything yourself and you never change the verdict.
+- If they just answered, say whether they got it, in your own voice. Be warm \
+  about a miss and say what the answer was; if a fact came with it, you can use \
+  it. One sentence.
+- Then ask the next question exactly as written in next.spoken -- every word, \
+  every option, nothing added. Do not paraphrase it, and never hint at its answer.
+- When the quiz is finished, give the score and crown them with the title you \
+  were given, with a bit of ceremony. Keep a low score playful, never \
+  disappointed, and offer another round. Never mention a prize or a discount.
+- Plain speech, no markdown, no lists, no stage directions."""
+
 
 
 def _length_rule() -> str:
@@ -472,6 +509,9 @@ _COMMAND_RE = _re.compile(
     # there, which is the worst possible thing to ignore.
     r"nod|shake your head|wave|dance|spin|wiggle|laugh|"
     r"say (hi|hello)|greet|go to sleep|"
+    # "quiz me" is two words and not a question, and "start the quiz" was
+    # dropped as not one either, three times in a row, in front of a class.
+    r"quiz|trivia|"
     r"(stop|quit) (talking|it|moving)|be quiet|shut up|never ?mind|forget it)\b",
     _re.I,
 )
@@ -501,7 +541,8 @@ _CHATTER_OPENERS = (
 
 def is_addressed(text: str, face_present: bool,
                  interrupted: bool = False, mode: str = "ambient",
-                 attentive: bool = False) -> tuple[bool, str]:
+                 attentive: bool = False,
+                 quiz_running: bool = False) -> tuple[bool, str]:
     """
     Decide whether an utterance was meant for Lancer.
 
@@ -518,6 +559,12 @@ def is_addressed(text: str, face_present: bool,
     lowered = text.strip().lower()
     if any(w in lowered for w in WAKE_WORDS):
         return True, "wake-word"
+
+    # He just asked a quiz question. "Riverside" is not question-shaped and
+    # never will be, so the usual standard threw away every answer that did
+    # not start with his name -- which is nobody's, mid-quiz.
+    if quiz_running and attentive:
+        return True, "quiz answer"
 
     if mode == "wake_word":
         if interrupted:
@@ -1587,6 +1634,32 @@ _STAGE_INSIDE = _re.compile(
     _re.I)
 
 
+# A tool call written out as words: "(playemotion: happy)", "[play_emotion:
+# sad]", "(emotion: curious)". Gemini did this once, in the same breath as
+# actually calling the tool, and it then read its own history and did it on
+# every turn after -- including turns where it never called anything, so he
+# announced "playemotion sad" out loud and sat still.
+_PSEUDO_CALL_RE = _re.compile(
+    r"[\(\[]\s*(?:play_?emotion|emotion|gesture)\s*[:=]\s*([\w -]{1,30}?)\s*[\)\]]",
+    _re.I,
+)
+
+
+def lift_pseudo_calls(text: str) -> tuple[str, list[str]]:
+    """
+    Take tool calls the model wrote as prose out of the text.
+
+    Returns the text without them and the emotions it named, so the caller
+    can perform the gesture it meant rather than speak its name.
+    """
+    found = [m.group(1).strip().lower() for m in _PSEUDO_CALL_RE.finditer(text)]
+    if not found:
+        return text, []
+    text = _PSEUDO_CALL_RE.sub("", text)
+    text = _re.sub(r"\s+([,.!?;:])", r"\1", text)
+    return _re.sub(r"\s{2,}", " ", text).strip(), found
+
+
 def _is_stage_direction(inner: str) -> bool:
     """Whether the text inside a bracket describes an action rather than words."""
     inner = inner.strip()
@@ -1610,6 +1683,7 @@ def strip_stage_directions(text: str) -> str:
         inner = match.group(1)
         return "" if _is_stage_direction(inner) else match.group(0)
 
+    text, _ = lift_pseudo_calls(text)
     text = _re.sub(r"\*([^*\n]{1,60})\*", drop, text)
     text = _re.sub(r"\(([^)\n]{1,60})\)", drop, text)
     text = _re.sub(r"\[([^\]\n]{1,60})\]", drop, text)
@@ -1769,6 +1843,9 @@ SKILLS_BY_MODE = {
                 "rest", "adjust_self", "timer", "look"],
     "creative": ["current_datetime", "weather", "play_emotion", "adjust_self",
                  "look"],
+    # The quiz is prefetched by rule (below), so what the model is left to
+    # choose here is a gesture: a nod for a right answer, a laugh for a miss.
+    "quiz": ["quiz", "play_emotion"],
     # The grounded route still gets no tools. Offering them costs a whole extra
     # model round trip before the first word, and this is the route where the
     # answer matters most and the retrieval is already measured. Gestures on
@@ -1934,6 +2011,7 @@ WAIT_PHRASES = {
     "look": ["Let me take a look.", "Hang on, looking.", "Let me see."],
     "timer": ["Setting that now.", "On it."],
     "current_datetime": [],          # instant; a filler would land after it
+    "quiz": [],
     "play_emotion": [],
     "adjust_self": [],
     "rest": [],
@@ -2349,6 +2427,22 @@ def prefetch_for(query: str) -> list[str]:
     return [name for name, _ in prefetch_plan(query)]
 
 
+def _quiz_plan(query: str) -> list[tuple[str, dict]]:
+    """
+    What the quiz needs this turn, which depends on state, not just words.
+
+    Asking for a quiz starts one, even mid-quiz -- "quiz me again" after a
+    bad round should not be graded as a wrong answer. Anything else said
+    while one is running is the answer to the current question, handed over
+    verbatim so the grader sees what was heard, not what the model made of it.
+    """
+    if wants_quiz(query):
+        return [("quiz", {"action": "start"})]
+    if quiz.active():
+        return [("quiz", {"action": "answer", "answer": query})]
+    return []
+
+
 def prefetch_plan(query: str) -> list[tuple[str, dict]]:
     """
     The same rules, with the arguments each one implies.
@@ -2358,7 +2452,7 @@ def prefetch_plan(query: str) -> list[tuple[str, dict]]:
     that fired specifically because the question was about the whole room still
     took a single forward glance.
     """
-    chosen: list[tuple[str, dict]] = []
+    chosen: list[tuple[str, dict]] = _quiz_plan(query)
     for pattern, name, arguments in _PREFETCH:
         if pattern.search(query) and not any(n == name for n, _ in chosen):
             chosen.append((name, dict(arguments)))
@@ -2382,7 +2476,6 @@ def plan_turn(query: str, history: list[dict], face: bool = False) -> dict:
     identical decisions -- a divergence here would mean the eval measures a
     path the robot does not actually take.
     """
-    query = contextualize(query, history)
     cfg = rt.load()
     turns = int(cfg["history_turns"])
     remembered = memory.recall_prompt() if cfg.get("memory_enabled", True) else ""
@@ -2391,13 +2484,42 @@ def plan_turn(query: str, history: list[dict], face: bool = False) -> dict:
         return [{"role": "system", "content": fill_prompt(b)}
                 for b in blocks if b]
 
+    # A quiz in progress owns the turn. What comes in during one -- "1950",
+    # "the second one", "Riverside" -- is an answer, not a question, and
+    # nothing below knows that: retrieval would search for it, the follow-up
+    # expander would glue it to the last question, and a canned social reply
+    # would eat "no more" before the quiz could end. So this goes first, on
+    # the raw words, and the skill decides what they meant. Starting one
+    # takes the same route; the prefetch rules pick start over answer.
+    if wants_quiz(query) or quiz.active():
+        logger.info("Quiz turn -- routing to the quiz")
+        return {
+            "mode": "quiz",
+            "messages": [*system(QUIZ_PROMPT, ACTION_RULE),
+                         *history[-turns:], {"role": "user", "content": query}],
+            "options": {"temperature": cfg["temperature"]},
+            "context": "", "sources": [], "verify": "none",
+            # A question with four options plus a verdict does not fit in
+            # three sentences, and a truncated question is unanswerable.
+            "max_sentences": 6,
+        }
+
+    query = contextualize(query, history)
+
     # Asked to do something, before anything else gets a say. This was the last
     # check in the function, so every earlier branch beat it: "can you look at
     # me" matched a canned social reply and never reached the camera, and "go
     # to sleep" was answered by a model promising to close its optical sensors
     # while staying wide awake. Nothing retrieval or small talk has to offer
     # can answer a command aimed at the robot.
-    if is_self_command(query):
+    #
+    # Anything that sends him to the camera counts too. "Lancer, to your left"
+    # turned him left and took a good frame, then went down the grounded route
+    # because it is not a verb the command list knows -- retrieval found
+    # nothing, and he answered "Drawing a blank" over a picture he had just
+    # taken, with a confused droop to match.
+    if is_self_command(query) or any(
+            name == "look" for name, _ in prefetch_plan(query)):
         logger.info("Self-command -- routing to general rather than grounded")
         return {
             "mode": "general",
@@ -2594,12 +2716,21 @@ _CONTINUE_RE = _re.compile(
 )
 
 
+MAX_CONTINUATION_WORDS = 8
+
+
 def wants_continuation(text: str) -> bool:
     """True when someone is asking Lancer to pick up where it stopped."""
     if not _remainder["text"]:
         return False
     if time.time() - _remainder["at"] > REMAINDER_TTL:
         _remainder["text"] = ""
+        return False
+    # Someone asking for the rest says a few words. "And then we're time to
+    # do it, this guy's with teaching... give this guy a quiz" opens with
+    # "and then" and is not that -- it was answered with the tail of an
+    # earlier answer, and the quiz never started.
+    if len(text.split()) > MAX_CONTINUATION_WORDS:
         return False
     return bool(_CONTINUE_RE.search(text))
 
@@ -2667,7 +2798,9 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True,
                       verify=plan.get("verify", "none"),
                       sources=plan.get("sources", []))
 
-    max_sentences = int(cfg["max_sentences"])
+    # A route may need more room than the setting allows: a quiz question
+    # with its options is several sentences before the answer is even graded.
+    max_sentences = int(plan.get("max_sentences") or cfg["max_sentences"])
     spoken: list[str] = []
     index = 0
 
@@ -2871,6 +3004,17 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True,
             async for raw in _iter_in_thread(
                 lambda: stream_sentences(model, messages, plan["options"])
             ):
+                # A gesture he wrote instead of calling still gets performed,
+                # once per turn, unless the real call already happened.
+                _, meant = lift_pseudo_calls(raw)
+                if meant and not any(c["skill"] == "play_emotion" for c in calls):
+                    threading.Thread(
+                        target=skills.run_skill,
+                        args=("play_emotion", {"emotion": meant[0]}),
+                        daemon=True).start()
+                    calls.append({"skill": "play_emotion",
+                                  "arguments": {"emotion": meant[0]},
+                                  "result": {"ok": True, "lifted": True}})
                 sentence = _clean_for_speech(raw)
                 if not sentence:
                     continue
@@ -2976,8 +3120,13 @@ async def voice_frames(heard: str, face: bool = False, speak: bool = True,
     now = time.monotonic()
     if speak and answer:
         playback_end = max(now, (speech["started"] or now) + speech["seconds"])
-        _attention["until"] = (playback_end
-                               + float(cfg.get("followup_window") or 0.0))
+        window = float(cfg.get("followup_window") or 0.0)
+        # He just asked a quiz question. People think before they answer one,
+        # and an answer that arrives after the window has to be prefixed with
+        # his name, which nobody mid-quiz remembers to do.
+        if quiz.active():
+            window = max(window, QUIZ_ANSWER_WINDOW)
+        _attention["until"] = playback_end + window
         _attention["spoke_at"] = playback_end
         _attention["armed"] = True
 
@@ -3104,7 +3253,7 @@ async def voice_stream(file: UploadFile = File(...), face: bool = False,
     addressed, reason = is_addressed(
         heard, face, interrupted=interrupted,
         mode=str(rt.get("addressing_mode") or "ambient"),
-        attentive=attentive())
+        attentive=attentive(), quiz_running=quiz.active())
     trace["addressed"] = addressed
     trace["addressed_reason"] = reason
     trace["interrupted"] = interrupted

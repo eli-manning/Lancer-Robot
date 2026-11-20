@@ -247,3 +247,7 @@ lancer_secrets.json
 
 # Pending timers are runtime state
 lancer_timers.json
+
+# A quiz in progress, and the scores people earned
+lancer_quiz.json
+lancer_quiz_results.jsonl

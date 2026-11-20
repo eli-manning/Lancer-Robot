@@ -111,3 +111,13 @@ def test_right_now_is_not_a_direction():
     assert plan("how many people are here right now").get("look") == {
         "survey": True}
     assert "look" not in plan("what time is it right now")
+
+
+def test_a_look_is_answered_from_what_he_saw_not_the_documents():
+    # "Lancer, to your left" looked left, then answered from retrieval:
+    # "Drawing a blank" about a picture it had just taken.
+    for line in ("Lancer to your left.", "what's on the screen on your right?",
+                 "what do you see", "how many people are in this room"):
+        turn = server.plan_turn(line, [])
+        assert turn["mode"] == "general", (line, turn["mode"])
+        assert turn["verify"] == "none", line

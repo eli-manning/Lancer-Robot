@@ -1,0 +1,171 @@
+{
+  "questions_per_quiz": 5,
+  "titles": [
+    {
+      "min_correct": 0,
+      "title": "a lost freshman on their first day"
+    },
+    {
+      "min_correct": 2,
+      "title": "a respectable campus wanderer"
+    },
+    {
+      "min_correct": 3,
+      "title": "an honorary campus tour guide"
+    },
+    {
+      "min_correct": 4,
+      "title": "a certified Lancer insider"
+    },
+    {
+      "min_correct": 5,
+      "title": "a CBU trivia legend"
+    }
+  ],
+  "questions": [
+    {
+      "q": "What year was California Baptist University founded?",
+      "answer": "1950",
+      "fact": "It started in 1950 as California Baptist College, in El Monte."
+    },
+    {
+      "q": "What city is CBU's campus in?",
+      "answer": "Riverside",
+      "accept": [
+        "riverside california"
+      ]
+    },
+    {
+      "q": "What are CBU's school colors?",
+      "answer": "blue and gold",
+      "accept": [
+        "navy and gold",
+        "gold and blue",
+        "gold and navy",
+        "navy blue and gold"
+      ]
+    },
+    {
+      "q": "What was CBU called before it became a university?",
+      "answer": "California Baptist College",
+      "accept": [
+        "cal baptist college",
+        "baptist college"
+      ]
+    },
+    {
+      "q": "In what year did California Baptist College become California Baptist University?",
+      "options": [
+        "1985",
+        "1998",
+        "2004",
+        "2011"
+      ],
+      "answer": "1998"
+    },
+    {
+      "q": "Which NCAA division does CBU compete in?",
+      "options": [
+        "Division One",
+        "Division Two",
+        "Division Three"
+      ],
+      "answer": "Division One",
+      "accept": [
+        "division 1",
+        "d1",
+        "d one",
+        "1",
+        "one"
+      ],
+      "fact": "The Lancers moved up to Division I in 2018."
+    },
+    {
+      "q": "Which athletic conference do the Lancers play in?",
+      "answer": "the Big West Conference",
+      "accept": [
+        "big west conference",
+        "big west",
+        "the big west"
+      ],
+      "fact": "The Lancers joined the Big West on July 1, 2026, after years in the WAC."
+    },
+    {
+      "q": "What street is CBU's main campus on?",
+      "answer": "Magnolia Avenue",
+      "accept": [
+        "magnolia"
+      ]
+    },
+    {
+      "q": "What is CBU's motto?",
+      "options": [
+        "Live Your Purpose",
+        "Lead With Faith",
+        "Learn To Serve",
+        "Find Your Calling"
+      ],
+      "answer": "Live Your Purpose"
+    },
+    {
+      "q": "CBU's college of engineering is named after which family?",
+      "answer": "Bourns",
+      "accept": [
+        "the bourns",
+        "gordon and jill bourns",
+        "bourns family"
+      ],
+      "fact": "It is the Gordon and Jill Bourns College of Engineering."
+    },
+    {
+      "q": "Before it moved to Riverside, what city was California Baptist College in?",
+      "options": [
+        "El Monte",
+        "Pasadena",
+        "San Bernardino",
+        "Anaheim"
+      ],
+      "answer": "El Monte",
+      "fact": "The college moved from El Monte to Riverside in 1955."
+    },
+    {
+      "q": "Who has been CBU's president since 1994?",
+      "answer": "Ronald Ellis",
+      "accept": [
+        "ellis",
+        "ron ellis",
+        "dr ellis",
+        "doctor ellis",
+        "ronald l ellis"
+      ]
+    },
+    {
+      "q": "What is the name of CBU's costumed mascot?",
+      "answer": "Lance",
+      "accept": [
+        "lance the lancer"
+      ]
+    },
+    {
+      "q": "Which student organization built me?",
+      "answer": "ACM",
+      "accept": [
+        "the acm",
+        "a c m",
+        "association for computing machinery",
+        "acm chapter",
+        "the acm chapter"
+      ]
+    },
+    {
+      "q": "What kind of robot am I?",
+      "answer": "a Reachy Mini",
+      "accept": [
+        "reachy mini",
+        "reachy",
+        "reachy mini robot"
+      ],
+      "fact": "A Reachy Mini, from Pollen Robotics."
+    }
+  ]
+}

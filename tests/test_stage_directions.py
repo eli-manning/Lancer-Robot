@@ -62,3 +62,23 @@ def test_punctuation_left_by_a_removal_is_tidied():
 def test_the_speech_path_applies_it():
     assert "Lancer laughs" not in server._clean_for_speech(
         "Sure. (Lancer laughs.) Here you go.")
+
+
+def test_a_tool_call_written_as_words_is_not_spoken():
+    # Gemini wrote "(playemotion: happy)" instead of calling the tool, then
+    # copied itself from history every turn after.
+    for raw in ("(playemotion: happy) That's correct!",
+                "[play_emotion: sad] Oh, not quite.",
+                "(emotion: curious) Tell me more."):
+        text, meant = server.lift_pseudo_calls(raw)
+        assert "emotion" not in text.lower(), text
+        assert len(meant) == 1
+    assert server.strip_stage_directions("(playemotion: sad) Oh, not quite.") \
+        == "Oh, not quite."
+    assert server.lift_pseudo_calls("(playemotion: happy) Hi")[1] == ["happy"]
+
+
+def test_real_parentheticals_survive():
+    text, meant = server.lift_pseudo_calls("It moved to Riverside (in 1955).")
+    assert text == "It moved to Riverside (in 1955)."
+    assert meant == []

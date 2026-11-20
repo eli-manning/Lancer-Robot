@@ -1,0 +1,25 @@
+{
+  "name": "quiz",
+  "description": "Run a short, just-for-fun CBU trivia quiz -- no prize, just a score and a silly title. Use 'start' when someone asks to be quizzed, tested, or wants to play trivia. While a quiz is running the server grades their answers automatically, so you will rarely need to call this yourself; 'status' repeats the current question, 'quit' ends the quiz early.",
+  "risk": "read",
+  "spoken_wait": "",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": [
+          "start",
+          "answer",
+          "status",
+          "quit"
+        ],
+        "description": "start a new quiz, answer the current question, repeat the current question, or quit. Defaults to status."
+      },
+      "answer": {
+        "type": "string",
+        "description": "What the person said, word for word. Required for answer."
+      }
+    }
+  }
+}
