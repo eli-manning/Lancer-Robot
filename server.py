@@ -335,16 +335,17 @@ SOCIAL_REPLIES: list[tuple[str, str]] = [
      "Over here? Got it. What do you need?"),
     (r"\b((stop|quit) (talking|it)|be quiet|shut up|never ?mind|forget it)\b",
      "Fine. I'll be here."),
-    (r"\b(who are you|what are you|your name|who is lancer)\b",
-     "I'm Lancer. The ACM chapter built me, and now I live on a desk answering "
-     "questions about California Baptist University. Ask me about programs, "
-     "courses or requirements."),
+    (r"\b(who are you|what are you|your name|who is lancer|who is reachy"
+     r"|are you (reachy|lancer)|call you (reachy|lancer))\b",
+     "I'm Lancer. I'm a Reachy Mini, so Reachy works too -- I answer to both. "
+     "The ACM chapter built me, and I know CBU's programs and the CBU "
+     "Motorsports race car team. Ask away, or ask me to quiz you."),
     (r"\b(what can you do|what do you know|how can you help|help me)\b",
-     "I can answer questions about CBU academics -- degree programs, course plans, "
-     "requirements, transfers and department policies. Ask me about whichever "
-     "program or requirement you're curious about."),
+     "I can answer questions about CBU academics and the CBU Motorsports Formula "
+     "SAE team, look around the room, set timers, and run a quick trivia quiz. "
+     "Try asking about Charger 6, or say quiz me."),
     (r"\b(thanks|thank you|appreciate it|nice one)\b",
-     "Happy to help. Ask me anything else about CBU."),
+     "Happy to help. Ask me anything else about CBU or the race car team."),
     (r"\b(bye|goodbye|see ya|later|good night)\b",
      "See you. I'll be here, obviously."),
     # Dancing and joking used to be on this "can't do that" list. Both work now
@@ -355,12 +356,13 @@ SOCIAL_REPLIES: list[tuple[str, str]] = [
      "Can't do that one yet. I can talk, look at you, and move around a bit. "
      "The ACM team is working on the rest."),
     (r"\b(what.s in your database|what do you have|what do you know about)\b",
-     "I've got CBU's computing and engineering material: the degree programs and "
-     "their four-year course plans, transfer guides, general education and "
-     "non-course requirements, and department policies like variances."),
+     "I've got CBU's computing and engineering material -- degree programs, "
+     "course plans, transfer guides, requirements and policies -- plus the CBU "
+     "Motorsports team, their Charger 6 race car, and the Formula SAE rules."),
     (r"\b(how old are you|where are you from|who made you|who built you)\b",
      "I was built by the ACM student chapter here at California Baptist "
-     "University. I'm a Reachy Mini running on their own retrieval system."),
+     "University. I'm a Reachy Mini, so you can call me Reachy too, running on "
+     "their own retrieval system."),
     (r"\b(how are you|how.s it going|what.s up|sup)\b",
      "Pretty good. Still bolted to a desk, but the view is fine. What do you "
      "want to know?"),
